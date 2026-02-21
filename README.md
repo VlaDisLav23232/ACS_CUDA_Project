@@ -159,9 +159,6 @@ python3 scripts/plot_results.py results.csv
 | `-v <variant>` | all | `cpu`, `fp32`, `fp16`, `kahan`, or `all` |
 | `-o <path>` | results/benchmarks.csv | CSV output path |
 
-### VSCode
-Open the project root (`ACS_CUDA_Project`). Press `Ctrl+Shift+B` to build, `F5` to debug with `cuda-gdb`. IntelliSense is configured for CUDA via `c_cpp_properties.json`.
-
 ## Hardware
 
 | Component | Value |
