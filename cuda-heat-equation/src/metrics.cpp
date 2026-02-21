@@ -40,9 +40,8 @@ void compute_errors(StencilResult& result, const std::vector<float>& reference) 
 void ensure_csv_header(const std::string& filepath) {
     struct stat st;
     if (stat(filepath.c_str(), &st) != 0) {
-        // file doesnt exist, create with header
         std::ofstream f(filepath);
-        f << "timestamp,variant,grid_size,timesteps,elapsed_ms,max_abs_error,l2_error,bandwidth_gbs,memory_bytes\n";
+        f << "timestamp,variant,dim,reach,grid_size,timesteps,elapsed_ms,max_abs_error,l2_error,bandwidth_gbs,memory_bytes\n";
         f.close();
     }
 }
@@ -55,6 +54,8 @@ void write_csv_row(const std::string& filepath, const StencilResult& result) {
 
     f << tbuf << ","
       << result.variant_name << ","
+      << result.dim << ","
+      << result.stencil_reach << ","
       << result.grid_size << ","
       << result.timesteps << ","
       << result.elapsed_ms << ","
@@ -67,7 +68,11 @@ void write_csv_row(const std::string& filepath, const StencilResult& result) {
 
 void print_summary(const StencilResult& result) {
     printf("  variant:    %s\n", result.variant_name.c_str());
-    printf("  grid:       %dx%d\n", result.grid_size, result.grid_size);
+    if (result.dim == 3)
+        printf("  grid:       %dx%dx%d\n", result.grid_size, result.grid_size, result.grid_size);
+    else
+        printf("  grid:       %dx%d\n", result.grid_size, result.grid_size);
+    printf("  reach:      %d\n", result.stencil_reach);
     printf("  timesteps:  %d\n", result.timesteps);
     printf("  time:       %.2f ms\n", result.elapsed_ms);
     printf("  max error:  %.6e\n", result.max_abs_error);

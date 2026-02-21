@@ -1,86 +1,139 @@
 # Compensated summation for stencil computation on CUDA with reduced-precision storage
 
-A semester project for the ACS (Архітектура Комп'ютерних Систем) course. We solve the 2D heat equation on an NVIDIA GPU, storing data in float16 to save memory bandwidth, and using Kahan compensated summation to recover float32-level accuracy despite the reduced-precision storage.
+A semester project for the ACS (Архітектура Комп'ютерних Систем) course. We solve the heat equation on an NVIDIA GPU in 2D and 3D with configurable stencil reach (R=1, 4, 8), storing data in float16 to save memory bandwidth, and using Kahan compensated summation to recover float32-level accuracy despite the reduced-precision storage.
 
 ## What this project does
 
-Heat spreads through a metal plate. We simulate this by discretizing the plate into a grid and updating each cell using its neighbors (a stencil operation), thousands of times. The core question: **can we store the temperature data in half precision (16-bit float, 2 bytes) instead of single precision (32-bit float, 4 bytes) without losing accuracy?**
+Heat spreads through a material. We simulate this by discretizing the domain into a grid (NxN or NxNxN) and updating each cell using its neighbors (a stencil operation), thousands of times. The core question: **can we store the temperature data in half precision (16-bit float) instead of single precision (32-bit float) without losing accuracy?**
 
-The answer is yes, if we use Kahan compensated summation. Without compensation, half-precision errors compound catastrophically over thousands of timesteps. With compensation, we recover the exact same accuracy as full float32 computation.
+The answer is yes, if we use Kahan compensated summation. Without compensation, half-precision errors compound catastrophically over thousands of timesteps. With compensation, we recover the exact same accuracy as full float32 computation. This holds across all dimensions (2D, 3D) and all stencil reaches (R=1, 4, 8).
 
 ## Theory
 
 ### The heat equation
 
-The 2D heat equation describes how temperature evolves over time in a material:
+The heat equation in $d$ dimensions:
 
-$$\frac{\partial u}{\partial t} = k \left( \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} \right)$$
+$$\frac{\partial u}{\partial t} = k \nabla^2 u$$
 
-We use the FTCS (Forward Time, Central Space) finite difference scheme to approximate this. Each grid point is updated using the 5-point stencil with reach R=1 (center + 1 neighbor in each of 4 directions):
+We use the FTCS (Forward Time, Central Space) finite difference scheme. For a stencil with reach $R$, the second derivative along each axis uses $2R+1$ points (R on each side + center). The central FD coefficients $c_0, c_1, \ldots, c_R$ approximate $\partial^2/\partial x^2$ with order $2R$:
 
-$$u_{i,j}^{n+1} = u_{i,j}^{n} + r \cdot \left( u_{i-1,j}^{n} + u_{i+1,j}^{n} + u_{i,j-1}^{n} + u_{i,j+1}^{n} - 4 u_{i,j}^{n} \right)$$
+$$\frac{\partial^2 u}{\partial x^2} \approx \frac{1}{\Delta x^2} \left[ c_0 u_i + \sum_{m=1}^{R} c_m (u_{i-m} + u_{i+m}) \right]$$
 
-where $r = k \cdot \Delta t / \Delta x^2$ must be less than 0.25 for stability in 2D. Our code auto-computes $\Delta t$ to keep $r = 0.2$.
+The full update in $d$ dimensions:
 
-Higher-order stencils use wider reach (R=4 or R=8 cells outward along each axis) for better spatial accuracy. These are always axis-aligned (+ shape, no diagonals). With R=4 that's 17 points in 2D (4 directions x 4 cells + center), with R=8 that's 33 points.
+$$u^{n+1} = u^n + r \cdot \left[ d \cdot c_0 \cdot u^n + \sum_{\text{axis}} \sum_{m=1}^{R} c_m \left( u^n_{+m} + u^n_{-m} \right) \right]$$
+
+where $r = k \cdot \Delta t / \Delta x^2$. The stencil is always axis-aligned (+ shape in 2D, star shape in 3D, no diagonals).
+
+### Stability (CFL condition)
+
+The stability limit depends on reach and dimensionality. We compute it from the worst-case eigenvalue of the FD operator via von Neumann analysis:
+
+$$r_{max} = \frac{2}{d \cdot |\lambda(\pi)|} \quad \text{where} \quad \lambda(\pi) = c_0 + 2\sum_{k=1}^{R} c_k (-1)^k$$
+
+| Reach | Order | 2D $r_{max}$ | 3D $r_{max}$ | Points (2D) | Points (3D) |
+|---|---|---|---|---|---|
+| R=1 | 2 | 0.250 | 0.167 | 5 | 7 |
+| R=4 | 8 | 0.154 | 0.103 | 17 | 25 |
+| R=8 | 16 | 0.135 | 0.090 | 33 | 49 |
+
+Our code auto-computes $\Delta t$ with 80% safety margin: $\Delta t = 0.8 \cdot r_{max} \cdot \Delta x^2 / k$.
+
+### FD coefficients
+
+The coefficients are computed at runtime by solving the $R \times R$ linear system that arises from matching Taylor expansion terms. For example:
+
+- R=1: $c_0 = -2, \; c_1 = 1$ (standard 3-point)
+- R=4: $c_0 = -2.847, \; c_1 = 1.600, \; c_2 = -0.200, \; c_3 = 0.025, \; c_4 = -0.002$
+- R=8: 9 coefficients, 16th-order accurate
 
 ### Float16 and the precision problem
 
-IEEE 754 float16 has 10 bits of mantissa (~3.3 decimal digits) versus float32's 23 bits (~7 digits). When we store a stencil result as float16, we lose roughly 3-4 decimal digits every timestep. Over 5000 timesteps, these tiny rounding errors accumulate and the solution drifts far from the correct answer.
+IEEE 754 float16 has 10 bits of mantissa (~3.3 decimal digits) versus float32's 23 bits (~7 digits). When we store a stencil result as float16, we lose roughly 3-4 decimal digits every timestep. Over thousands of timesteps, these tiny rounding errors accumulate and the solution drifts far from the correct answer.
 
 ### Kahan compensated summation
 
 Kahan's algorithm (1965) tracks what was lost in each rounding operation and adds it back next time:
 
 1. Load the `__half` value from GPU memory and add the stored compensation to recover the "true" value
-2. Do all stencil arithmetic in float32
+2. Do all stencil arithmetic in float32 (including loading and compensating all $2dR$ neighbors)
 3. Store the result back as `__half` (this is lossy)
 4. Compute what was lost: `compensation = exact_result - half2float(stored_half)`
 5. Save the compensation (in float32) for the next timestep
 
-The compensation array costs extra memory (float32 per grid cell), but the temperature data is stored in half precision, so the total memory is 75% of the pure float32 approach (2 half arrays + 2 float arrays for Kahan, vs 2 float arrays for fp32).
-
 ## Results
 
-We ran a full benchmark sweep across 5 grid sizes (64 to 1024) and 4 timestep counts (100 to 5000), producing 80 data points across 4 computation variants.
+We ran a comprehensive benchmark: 2D with N=64,128,256,512 and 3D with N=32,64,128, each at R=1,4,8, total of 84 measurements across 4 computation variants.
 
-### The headline numbers (N=1024, T=5000)
+### 2D results (T=1000)
 
-| Variant | Time (ms) | Speedup vs CPU | Max error | L2 error | Bandwidth |
+| N | Reach | Variant | Time (ms) | Max error | Bandwidth |
 |---|---|---|---|---|---|
-| CPU fp64 | 4704.75 | 1.0x | 0 (reference) | 0 | n/a |
-| CUDA fp32 | 430.01 | 10.9x | 1.14e-03 | 5.40e-06 | 291.5 GB/s |
-| CUDA fp16 naive | 355.16 | 13.2x | **78.40** | **0.465** | 176.5 GB/s |
-| CUDA fp16 + Kahan | 683.01 | 6.9x | **1.14e-03** | **5.40e-06** | 275.3 GB/s |
+| 512 | R=1 | CPU fp64 | 334.1 | 0 (ref) | n/a |
+| 512 | R=1 | CUDA fp32 | 29.3 | 9.16e-05 | 213 GB/s |
+| 512 | R=1 | fp16 naive | 21.5 | **3.01** | 145 GB/s |
+| 512 | R=1 | fp16+Kahan | 42.0 | **9.16e-05** | 223 GB/s |
+| 512 | R=4 | CPU fp64 | 1190.5 | 0 (ref) | n/a |
+| 512 | R=4 | CUDA fp32 | 50.2 | 1.83e-04 | 365 GB/s |
+| 512 | R=4 | fp16 naive | 44.9 | **8.77** | 204 GB/s |
+| 512 | R=4 | fp16+Kahan | 85.5 | **1.83e-04** | 321 GB/s |
+| 512 | R=8 | CPU fp64 | 5522.1 | 0 (ref) | n/a |
+| 512 | R=8 | CUDA fp32 | 80.5 | 1.07e-04 | 415 GB/s |
+| 512 | R=8 | fp16 naive | 75.1 | **5.85** | 223 GB/s |
+| 512 | R=8 | fp16+Kahan | 131.6 | **1.07e-04** | 381 GB/s |
 
-### What the numbers tell us
+### 3D results (T=500)
 
-**Kahan works perfectly.** The fp16+Kahan variant produces exactly the same error as fp32 across all 20 test configurations. The compensation mechanism successfully tracks every bit of rounding error from the half-precision storage.
+| N | Reach | Variant | Time (ms) | Speedup vs CPU | Max error | Bandwidth |
+|---|---|---|---|---|---|---|
+| 128 | R=1 | CPU fp64 | 1,970 | 1.0x | 0 (ref) | n/a |
+| 128 | R=1 | CUDA fp32 | 164 | 12.0x | 5.72e-06 | 195 GB/s |
+| 128 | R=1 | fp16 naive | 134 | 14.7x | **0.221** | 119 GB/s |
+| 128 | R=1 | fp16+Kahan | 241 | 8.2x | **5.72e-06** | 199 GB/s |
+| 128 | R=4 | CPU fp64 | 40,406 | 1.0x | 0 (ref) | n/a |
+| 128 | R=4 | CUDA fp32 | 425 | 95.1x | 1.14e-05 | 212 GB/s |
+| 128 | R=4 | fp16 naive | 374 | 108.1x | **0.375** | 120 GB/s |
+| 128 | R=4 | fp16+Kahan | 755 | 53.5x | **1.14e-05** | 179 GB/s |
+| 128 | R=8 | CPU fp64 | 369,728 | 1.0x | 0 (ref) | n/a |
+| 128 | R=8 | CUDA fp32 | 674 | 548.6x | 4.73e-04 | 209 GB/s |
+| 128 | R=8 | fp16 naive | 618 | 598.3x | **0.558** | 114 GB/s |
+| 128 | R=8 | fp16+Kahan | 1,263 | 292.8x | **4.73e-04** | 167 GB/s |
 
-**Naive fp16 fails catastrophically.** Without compensation, errors grow roughly linearly with timesteps. At N=1024: T=100 gives error 0.55, T=1000 gives 10.97, T=5000 gives 78.40. The simulation becomes useless.
+### Analysis
 
-**Kahan overhead is 1.6x.** The Kahan variant runs about 60% slower than pure fp32 because it reads/writes the compensation array every timestep and launches extra boundary condition kernels. Still, it is 6.9x faster than the single-threaded CPU.
+**Kahan works perfectly across all configurations.** In every single one of 84 measurements, the fp16+Kahan variant produces identical max error to fp32. This holds for 2D and 3D, for R=1 and R=8, for N=32 and N=512. The compensation mechanism universally rescues half-precision from catastrophic drift.
 
-**Cache amplification.** Our measured bandwidth exceeds the theoretical DRAM peak of 192 GB/s (up to 342 GB/s at N=1024). The theoretical peak is calculated as: GDDR6 data rate (12 Gbps per pin) x bus width (128 bits) / 8 = 192 GB/s. The measured values exceed this because the GPU's L2 cache (1 MB on TU117) serves many of the neighbor reads. Adjacent thread blocks share boundary data through the cache, effectively amplifying the measured bandwidth.
+**Naive fp16 error scales with grid size and reach.** At 2D N=512 R=8, the naive error is 5.85 (on a signal of magnitude ~200). Wider stencils amplify the effect because more rounded values are summed per step. This makes naive fp16 unusable for production simulations.
 
-**Small grids favor CPU.** At N=64, CPU finishes in 0.32 ms while GPU takes 0.60 ms. Kernel launch overhead and insufficient parallelism make the GPU slower. The crossover is around N=128.
+**GPU speedup is massive in 3D.** The CPU is single-threaded and must iterate over N^3 points. At N=128 R=8, the GPU achieves **549x speedup** for fp32 and **293x** for Kahan. Even with Kahan's overhead, the GPU is nearly 300x faster than the CPU for 3D R=8 problems.
 
-### Benchmark plot
+**Higher reach = more arithmetic intensity = better cache utilization.** At 2D N=512, measured bandwidth exceeds the 192 GB/s DRAM peak (up to 415 GB/s for fp32 R=8). This is because L2 cache (1 MB on TU117) serves repeated neighbor reads. Wider stencils have more data reuse, so cache amplification increases with reach.
 
-![Benchmark results](cuda-heat-equation/results.png)
+**3D keeps bandwidth near peak.** 3D N=128 gives the GPU enough work to saturate memory: fp32 reaches 195-212 GB/s, very close to the 192 GB/s theoretical DRAM peak. The Kahan variant achieves 167-199 GB/s despite extra reads/writes.
 
-The plot shows four panels:
-- **Top-left**: max absolute error vs grid size. CPU is at 0, fp32 and Kahan overlap at ~1e-4, naive fp16 sits at 1e0 to 10e1. The gap between naive and Kahan is 4-5 orders of magnitude.
-- **Top-right**: relative L2 error. Same pattern, normalized by signal magnitude.
-- **Bottom-left**: runtime vs grid size at T=5000. CPU grows quadratically, GPU sub-linearly due to parallelism.
-- **Bottom-right**: effective bandwidth. fp32 saturates around 290 GB/s, Kahan around 275 GB/s, naive fp16 at 177 GB/s. Red dashed line shows the 192 GB/s DRAM theoretical peak.
+**Kahan overhead is ~1.7x.** Across all configurations, Kahan is about 1.5-1.9x slower than fp32 due to the compensation array reads/writes and extra boundary kernels. The tradeoff: fp32-level accuracy with half the temperature storage.
+
+### Plots
+
+All plots are generated into [cuda-heat-equation/results/](cuda-heat-equation/results/).
+
+| Plot | Description |
+|---|---|
+| [summary.png](cuda-heat-equation/results/summary.png) | 4-panel overview: bandwidth by reach (2D/3D), Kahan vs naive accuracy, 3D speedup |
+| [2d_accuracy.png](cuda-heat-equation/results/2d_accuracy.png) | Max error vs N for each reach (2D) |
+| [2d_bandwidth.png](cuda-heat-equation/results/2d_bandwidth.png) | Effective bandwidth vs N (2D) |
+| [2d_speedup.png](cuda-heat-equation/results/2d_speedup.png) | GPU speedup over CPU (2D) |
+| [3d_accuracy.png](cuda-heat-equation/results/3d_accuracy.png) | Max error vs N for each reach (3D) |
+| [3d_bandwidth.png](cuda-heat-equation/results/3d_bandwidth.png) | Effective bandwidth vs N (3D) |
+| [3d_speedup.png](cuda-heat-equation/results/3d_speedup.png) | GPU speedup over CPU (3D) |
 
 ## Project structure
 
 ```
 ACS_CUDA_Project/
   README.md                                    this file
-  .gitignore                                   ignores build/, .vscode/, .github/
+  .gitignore                                   ignores build/, *.o, *.csv, *.png
   heat1d.py                                    Python 1D heat reference
   heat2d.py                                    Python 2D heat reference
 
@@ -88,36 +141,22 @@ ACS_CUDA_Project/
     CMakeLists.txt                             build system (sm_75, C++17)
     include/
       stencil.h                                StencilConfig + StencilResult structs
+      fd_coefficients.h                        FD coefficient solver for arbitrary reach
       metrics.h                                error computation + CSV declarations
     src/
-      main.cpp                                 CLI parsing, orchestration, auto-stability
-      heat2d_cpu.cpp                           CPU fp64 reference (ground truth)
-      heat2d_cuda.cu                           CUDA fp32 baseline kernel
-      heat2d_cuda_fp16.cu                      fp16 naive + fp16 Kahan kernels
+      main.cpp                                 CLI parsing, FD coefficients, 2D/3D dispatch
+      heat2d_cpu.cpp                           CPU fp64 reference, variable reach
+      heat2d_cuda.cu                           CUDA fp32 kernel, variable reach
+      heat2d_cuda_fp16.cu                      fp16 naive + fp16 Kahan, variable reach
+      heat3d_cpu.cpp                           3D CPU fp64 reference, variable reach
+      heat3d_cuda.cu                           3D CUDA fp32, 8x8x4 thread blocks
+      heat3d_cuda_fp16.cu                      3D fp16 naive + fp16 Kahan
       metrics.cpp                              error metrics, CSV writer, NaN handling
     scripts/
-      run_benchmarks.sh                        sweep: 5 grid sizes x 4 timestep counts
-      plot_results.py                          matplotlib 4-panel visualization
-    build/                                     compiled output (gitignored)
-    results.csv                                benchmark data (80 rows)
-    results.png                                generated plot
+      run_benchmarks.sh                        sweep: 2D + 3D, R=1/4/8, multiple N
+      plot_results.py                          7-plot visualization suite
+    results/                                   benchmark CSV + generated plots
 ```
-
-### Key source files
-
-**stencil.h** defines two structs shared across all files. `StencilConfig` holds simulation parameters (grid size, time step, thermal diffusivity). `StencilResult` is what every variant returns (timing, errors, bandwidth, the final temperature grid).
-
-**main.cpp** parses CLI flags (`-n` grid size, `-t` timesteps, `-v` variant, `-o` CSV path), auto-computes a stable time step from the grid spacing, runs the CPU reference first, then each GPU variant, computing errors against the CPU output.
-
-**heat2d_cpu.cpp** is our ground truth. Uses double precision (fp64, 15 decimal digits) with ping-pong buffers. Identical stencil logic to the CUDA versions but without any precision loss.
-
-**heat2d_cuda.cu** is the GPU fp32 baseline. 16x16 thread blocks, one thread per grid point. Uses `cudaEvent` timing and pointer swapping (instead of copying data each step). Separate Neumann boundary condition kernel.
-
-**heat2d_cuda_fp16.cu** is the core deliverable. Contains two kernels:
-- The **naive kernel** loads `__half`, converts to float for math, stores back as `__half`. Every conversion loses bits.
-- The **Kahan kernel** keeps a float32 compensation array alongside the half-precision grid. Before each stencil update, it adds back the compensation to recover lost precision. After storing as half, it computes and saves the rounding error for next time. Uses `volatile` to prevent the compiler from optimizing away the compensation.
-
-**metrics.cpp** computes max absolute error and relative L2 norm between a result and the reference. Handles NaN/Inf values gracefully. Writes timestamped CSV rows.
 
 ## How to build and run
 
@@ -132,30 +171,38 @@ ACS_CUDA_Project/
 ### Build
 ```bash
 cd cuda-heat-equation
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
 ### Run
 ```bash
-# quick test: all variants, 256x256 grid, 1000 steps
-./build/heat_stencil -n 256 -t 1000 -v all -o results.csv
+# 2D, reach=1, 256x256, 1000 steps (backward compatible with Phase 1)
+./build/heat_stencil -n 256 -t 1000
 
-# just the Kahan variant
-./build/heat_stencil -n 512 -t 5000 -v kahan
+# 2D, wider stencil (8th-order FD)
+./build/heat_stencil -n 256 -t 1000 -r 4
 
-# full benchmark sweep
+# 3D, reach=1, 64x64x64, 500 steps
+./build/heat_stencil -n 64 -t 500 -d 3
+
+# 3D, maximum reach, large grid
+./build/heat_stencil -n 128 -t 500 -d 3 -r 8
+
+# full benchmark sweep (takes ~7 minutes)
 bash scripts/run_benchmarks.sh
 
 # generate plots
-python3 scripts/plot_results.py results.csv
+python3 scripts/plot_results.py
 ```
 
 ### CLI flags
 | Flag | Default | Description |
 |---|---|---|
-| `-n <size>` | 256 | Grid dimensions (NxN) |
+| `-n <size>` | 256 | Grid size (NxN for 2D, NxNxN for 3D) |
 | `-t <steps>` | 5000 | Number of timesteps |
+| `-d <dim>` | 2 | Dimensionality: 2 or 3 |
+| `-r <reach>` | 1 | Stencil reach per axis: 1 to 8 |
 | `-v <variant>` | all | `cpu`, `fp32`, `fp16`, `kahan`, or `all` |
 | `-o <path>` | results/benchmarks.csv | CSV output path |
 
@@ -173,11 +220,32 @@ python3 scripts/plot_results.py results.csv
 | OS | Debian 13 (trixie), kernel 6.12.73 |
 | CUDA | 12.4.131, driver 550.163.01 |
 
+## What was completed
+
+### Phase 1 (complete)
+- 2D heat equation solver with FTCS, 5-point stencil (R=1)
+- Four variants: CPU fp64, CUDA fp32, CUDA fp16 naive, CUDA fp16+Kahan
+- Benchmark framework with CSV output, error metrics, bandwidth measurement
+- Benchmark sweep (80 data points) and 4-panel visualization
+
+### Phase 2 (complete)
+- Configurable stencil reach R=1 to 8 (axis-aligned, no diagonals)
+- FD coefficient computation via Gaussian elimination at runtime
+- Automatic CFL stability limit from von Neumann analysis
+- 3D heat equation: CPU fp64 reference, CUDA fp32, fp16 naive, fp16+Kahan
+- Full benchmark sweep (84 data points across 2D/3D, R=1/4/8)
+- 7-plot visualization suite
+
 ## Next steps
 
-This project continues with 4-person team work:
+1. **Shared memory tiling.** Current kernels read from global memory for every neighbor. Loading a tile into shared memory would reduce redundant DRAM reads, especially for wider stencils where R=8 means 49 loads per thread in 3D.
 
-1. **3D stencil with configurable reach** (our task): extend from 2D NxN to 3D NxNxN, support configurable stencil reach R=1 (current 5/7-point), R=4 (17/25-point), R=8 (33/49-point). Always axis-aligned (+ shape), no diagonals. Higher R = higher-order finite difference = better spatial accuracy but more memory reads.
-2. **Kahan for all stencil types**: extend compensation to wider-reach stencils (R=4, R=8) in 2D and 3D, plus OpenMP CPU parallel baseline
-3. **GPU optimizations**: shared memory tiling, temporal blocking, register optimization
-4. **SOTA equations**: wave equation, advection-diffusion, 2.5D stencils, higher-order schemes
+2. **OpenMP CPU baseline.** The current CPU reference is single-threaded. Adding `#pragma omp parallel for` would give a fairer CPU vs GPU comparison on the 6-core Ryzen 5 5600H (expect ~5x speedup).
+
+3. **Temporal blocking.** Instead of one timestep per kernel launch, compute multiple timesteps inside a single kernel using shared memory. This reduces kernel launch overhead and global memory traffic. Particularly valuable for R=1 where arithmetic intensity is lowest.
+
+4. **Roofline model analysis.** Plot our measured performance on a roofline chart (FLOP/s vs arithmetic intensity) to determine whether we are memory-bound or compute-bound for each (dim, reach) combination. This would guide which optimization to prioritize.
+
+5. **Larger 3D grids.** N=256 in 3D (256^3 = 16.7M points, ~128 MB for fp32) would fit in our 4 GB VRAM and stress the GPU more. N=128 R=8 already shows ~549x speedup over CPU; N=256 would push this further.
+
+6. **Wave equation / advection-diffusion.** Different PDEs have different stencil patterns. The FD coefficient infrastructure supports any central second-derivative stencil, so adding a wave equation ($u_{tt} = c^2 \nabla^2 u$) would demonstrate the generality of the Kahan compensation approach.

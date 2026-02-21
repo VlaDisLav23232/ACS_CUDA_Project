@@ -14,33 +14,27 @@
 static const int BLOCK_X = 16;
 static const int BLOCK_Y = 16;
 
-// fp16 storage, fp32 compute, NO Kahan
-// the idea: load __half from memory (saves bandwidth), convert to float for math,
-// then convert back to __half for storage.
-// problem: every timestep we lose bits when converting float result back to half
+__constant__ float d_coeffs_fp16[MAX_REACH + 1];
+__constant__ int   d_reach_fp16;
+
 __global__ void heat2d_fp16_naive_kernel(const __half* __restrict__ u,
                                           __half* __restrict__ u_next,
                                           int N, float r) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int R = d_reach_fp16;
 
-    if (i >= 1 && i < N - 1 && j >= 1 && j < N - 1) {
+    if (i >= R && i < N - R && j >= R && j < N - R) {
         float center = __half2float(u[j * N + i]);
-        float left   = __half2float(u[j * N + (i - 1)]);
-        float right  = __half2float(u[j * N + (i + 1)]);
-        float up     = __half2float(u[(j - 1) * N + i]);
-        float down   = __half2float(u[(j + 1) * N + i]);
-
-        float result = center + r * (left + right + up + down - 4.0f * center);
-        u_next[j * N + i] = __float2half(result);
+        float lap = 2.0f * d_coeffs_fp16[0] * center;
+        for (int m = 1; m <= R; m++) {
+            lap += d_coeffs_fp16[m] * (__half2float(u[j * N + (i - m)]) + __half2float(u[j * N + (i + m)])
+                                     + __half2float(u[(j - m) * N + i]) + __half2float(u[(j + m) * N + i]));
+        }
+        u_next[j * N + i] = __float2half(center + r * lap);
     }
 }
 
-// fp16 storage, fp32 compute, WITH Kahan compensated summation
-// key insight: we keep a separate fp32 compensation array c[] that tracks
-// the error accumulated from half->float->half roundtrips.
-// each step: we subtract the previous compensation before computing,
-// then figure out how much got lost and store that for next time
 __global__ void heat2d_fp16_kahan_kernel(const __half* __restrict__ u,
                                           __half* __restrict__ u_next,
                                           float* __restrict__ c,
@@ -48,52 +42,51 @@ __global__ void heat2d_fp16_kahan_kernel(const __half* __restrict__ u,
                                           int N, float r) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int R = d_reach_fp16;
 
-    if (i >= 1 && i < N - 1 && j >= 1 && j < N - 1) {
+    if (i >= R && i < N - R && j >= R && j < N - R) {
         int idx = j * N + i;
-
-        // load from fp16 storage and add back the compensation
-        float center = __half2float(u[idx])       + c[idx];
-        float left   = __half2float(u[j*N+(i-1)]) + c[j*N+(i-1)];
-        float right  = __half2float(u[j*N+(i+1)]) + c[j*N+(i+1)];
-        float up     = __half2float(u[(j-1)*N+i]) + c[(j-1)*N+i];
-        float down   = __half2float(u[(j+1)*N+i]) + c[(j+1)*N+i];
-
-        // FTCS stencil update in full fp32
-        float exact_result = center + r * (left + right + up + down - 4.0f * center);
-
-        // store the result as fp16 (lossy!)
+        float center = __half2float(u[idx]) + c[idx];
+        float lap = 2.0f * d_coeffs_fp16[0] * center;
+        for (int m = 1; m <= R; m++) {
+            float xm = __half2float(u[j * N + (i - m)]) + c[j * N + (i - m)];
+            float xp = __half2float(u[j * N + (i + m)]) + c[j * N + (i + m)];
+            float ym = __half2float(u[(j - m) * N + i]) + c[(j - m) * N + i];
+            float yp = __half2float(u[(j + m) * N + i]) + c[(j + m) * N + i];
+            lap += d_coeffs_fp16[m] * (xm + xp + ym + yp);
+        }
+        float exact_result = center + r * lap;
         __half stored = __float2half(exact_result);
         u_next[idx] = stored;
-
-        // the compensation is: what we wanted to store minus what actually got stored
-        // this is the Kahan trick - we track the rounding error
         volatile float stored_back = __half2float(stored);
         c_next[idx] = exact_result - stored_back;
     }
 }
 
-__global__ void apply_neumann_bc_fp16(__half* u, int N) {
+__global__ void apply_neumann_bc_fp16(__half* u, int N, int R) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
-        u[0 * N + idx] = u[1 * N + idx];
-        u[(N-1) * N + idx] = u[(N-2) * N + idx];
-        u[idx * N + 0] = u[idx * N + 1];
-        u[idx * N + (N-1)] = u[idx * N + (N-2)];
+        for (int b = R - 1; b >= 0; b--) {
+            u[b * N + idx]       = u[(b + 1) * N + idx];
+            u[(N-1-b) * N + idx] = u[(N-2-b) * N + idx];
+            u[idx * N + b]       = u[idx * N + (b + 1)];
+            u[idx * N + (N-1-b)] = u[idx * N + (N-2-b)];
+        }
     }
 }
 
-__global__ void apply_neumann_bc_comp(float* c, int N) {
+__global__ void apply_neumann_bc_comp(float* c, int N, int R) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
-        c[0 * N + idx] = c[1 * N + idx];
-        c[(N-1) * N + idx] = c[(N-2) * N + idx];
-        c[idx * N + 0] = c[idx * N + 1];
-        c[idx * N + (N-1)] = c[idx * N + (N-2)];
+        for (int b = R - 1; b >= 0; b--) {
+            c[b * N + idx]       = c[(b + 1) * N + idx];
+            c[(N-1-b) * N + idx] = c[(N-2-b) * N + idx];
+            c[idx * N + b]       = c[idx * N + (b + 1)];
+            c[idx * N + (N-1-b)] = c[idx * N + (N-2-b)];
+        }
     }
 }
 
-// helper to convert float array to half on host
 static std::vector<__half> float_to_half(const std::vector<float>& f) {
     std::vector<__half> h(f.size());
     for (size_t i = 0; i < f.size(); i++)
@@ -103,9 +96,13 @@ static std::vector<__half> float_to_half(const std::vector<float>& f) {
 
 StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
     int N = cfg.nx;
+    int R = cfg.stencil_reach;
     float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
     size_t n_elems = N * N;
     size_t half_bytes = n_elems * sizeof(__half);
+
+    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_fp16, cfg.fd_coeffs, (R + 1) * sizeof(float)));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_fp16, &R, sizeof(int)));
 
     std::vector<float> h_f(n_elems, cfg.temp_initial);
     int src_size = N / 8;
@@ -134,7 +131,7 @@ StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
 
     for (int t = 0; t < cfg.timesteps; t++) {
         heat2d_fp16_naive_kernel<<<grid, block>>>(d_u, d_u_next, N, r);
-        apply_neumann_bc_fp16<<<bc_blocks, bc_threads>>>(d_u_next, N);
+        apply_neumann_bc_fp16<<<bc_blocks, bc_threads>>>(d_u_next, N, R);
         __half* tmp = d_u; d_u = d_u_next; d_u_next = tmp;
     }
 
@@ -149,13 +146,17 @@ StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
     for (size_t i = 0; i < n_elems; i++)
         result_f[i] = __half2float(h_data[i]);
 
-    double bytes_per_step = (double)(N - 2) * (N - 2) * 6 * sizeof(__half);
+    int interior = N - 2 * R;
+    double reads_per_point = (2 * 2 * R + 1);
+    double bytes_per_step = (double)interior * interior * (reads_per_point + 1) * sizeof(__half);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_naive";
     res.grid_size = N;
+    res.dim = cfg.dim;
+    res.stencil_reach = R;
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
@@ -171,10 +172,14 @@ StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
 
 StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
     int N = cfg.nx;
+    int R = cfg.stencil_reach;
     float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
     size_t n_elems = N * N;
     size_t half_bytes = n_elems * sizeof(__half);
     size_t float_bytes = n_elems * sizeof(float);
+
+    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_fp16, cfg.fd_coeffs, (R + 1) * sizeof(float)));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_fp16, &R, sizeof(int)));
 
     std::vector<float> h_f(n_elems, cfg.temp_initial);
     int src_size = N / 8;
@@ -184,7 +189,7 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
             h_f[j * N + i] = cfg.temp_source;
 
     auto h_data = float_to_half(h_f);
-    std::vector<float> h_comp(n_elems, 0.0f); // compensation starts at zero
+    std::vector<float> h_comp(n_elems, 0.0f);
 
     __half *d_u, *d_u_next;
     float *d_c, *d_c_next;
@@ -209,9 +214,8 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
 
     for (int t = 0; t < cfg.timesteps; t++) {
         heat2d_fp16_kahan_kernel<<<grid, block>>>(d_u, d_u_next, d_c, d_c_next, N, r);
-        apply_neumann_bc_fp16<<<bc_blocks, bc_threads>>>(d_u_next, N);
-        apply_neumann_bc_comp<<<bc_blocks, bc_threads>>>(d_c_next, N);
-        // swap both grid and compensation pointers
+        apply_neumann_bc_fp16<<<bc_blocks, bc_threads>>>(d_u_next, N, R);
+        apply_neumann_bc_comp<<<bc_blocks, bc_threads>>>(d_c_next, N, R);
         __half* tmp_h = d_u; d_u = d_u_next; d_u_next = tmp_h;
         float* tmp_c = d_c; d_c = d_c_next; d_c_next = tmp_c;
     }
@@ -224,24 +228,26 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
     CUDA_CHECK(cudaMemcpy(h_data.data(), d_u, half_bytes, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_comp.data(), d_c, float_bytes, cudaMemcpyDeviceToHost));
 
-    // reconstruct full-precision result: stored_half + compensation
     std::vector<float> result_f(n_elems);
     for (size_t i = 0; i < n_elems; i++)
         result_f[i] = __half2float(h_data[i]) + h_comp[i];
 
-    // bandwidth: reads 5 halfs + 5 floats (compensation), writes 1 half + 1 float
-    double read_bytes = (double)(N-2)*(N-2) * (5*sizeof(__half) + 5*sizeof(float));
-    double write_bytes = (double)(N-2)*(N-2) * (sizeof(__half) + sizeof(float));
-    double total_bytes = (read_bytes + write_bytes) * cfg.timesteps;
+    int interior = N - 2 * R;
+    double reads_per_point = (2 * 2 * R + 1);
+    double half_rw = (reads_per_point + 1) * sizeof(__half);
+    double comp_rw = (reads_per_point + 1) * sizeof(float);
+    double bytes_per_step = (double)interior * interior * (half_rw + comp_rw);
+    double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_kahan";
     res.grid_size = N;
+    res.dim = cfg.dim;
+    res.stencil_reach = R;
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
-    // extra memory for compensation arrays
     res.memory_bytes = 2 * half_bytes + 2 * float_bytes;
     res.final_grid = result_f;
 
