@@ -10,43 +10,51 @@
     } \
 } while(0)
 
-// block size for 2D kernel - 16x16 = 256 threads is a good default for stencils
-// fits nicely in SM resources on CC 7.5 (max 1024 threads/block, 48KB shared mem)
 static const int BLOCK_X = 16;
 static const int BLOCK_Y = 16;
+
+__constant__ float d_coeffs_fp32[MAX_REACH + 1];
+__constant__ int   d_reach_fp32;
 
 __global__ void heat2d_fp32_kernel(const float* __restrict__ u,
                                     float* __restrict__ u_next,
                                     int N, float r) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int R = d_reach_fp32;
 
-    if (i >= 1 && i < N - 1 && j >= 1 && j < N - 1) {
+    if (i >= R && i < N - R && j >= R && j < N - R) {
         float center = u[j * N + i];
-        float left   = u[j * N + (i - 1)];
-        float right  = u[j * N + (i + 1)];
-        float up     = u[(j - 1) * N + i];
-        float down   = u[(j + 1) * N + i];
-        u_next[j * N + i] = center + r * (left + right + up + down - 4.0f * center);
+        float lap = 2.0f * d_coeffs_fp32[0] * center;
+        for (int m = 1; m <= R; m++) {
+            lap += d_coeffs_fp32[m] * (u[j * N + (i - m)] + u[j * N + (i + m)]
+                                     + u[(j - m) * N + i] + u[(j + m) * N + i]);
+        }
+        u_next[j * N + i] = center + r * lap;
     }
 }
 
-__global__ void apply_neumann_bc(float* u, int N) {
+__global__ void apply_neumann_bc(float* u, int N, int R) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
-        u[0 * N + idx] = u[1 * N + idx];
-        u[(N-1) * N + idx] = u[(N-2) * N + idx];
-        u[idx * N + 0] = u[idx * N + 1];
-        u[idx * N + (N-1)] = u[idx * N + (N-2)];
+        for (int b = R - 1; b >= 0; b--) {
+            u[b * N + idx]       = u[(b + 1) * N + idx];
+            u[(N-1-b) * N + idx] = u[(N-2-b) * N + idx];
+            u[idx * N + b]       = u[idx * N + (b + 1)];
+            u[idx * N + (N-1-b)] = u[idx * N + (N-2-b)];
+        }
     }
 }
 
 StencilResult run_cuda_fp32(const StencilConfig& cfg) {
     int N = cfg.nx;
+    int R = cfg.stencil_reach;
     float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
     size_t grid_bytes = N * N * sizeof(float);
 
-    // prepare initial condition on host (same as CPU)
+    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_fp32, cfg.fd_coeffs, (R + 1) * sizeof(float)));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_fp32, &R, sizeof(int)));
+
     std::vector<float> h_u(N * N, cfg.temp_initial);
     int src_size = N / 8;
     int src_start = N / 2 - src_size / 2;
@@ -65,7 +73,6 @@ StencilResult run_cuda_fp32(const StencilConfig& cfg) {
     int bc_threads = 256;
     int bc_blocks = (N + bc_threads - 1) / bc_threads;
 
-    // timing with CUDA events (more accurate than wall clock for GPU work)
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
@@ -73,8 +80,7 @@ StencilResult run_cuda_fp32(const StencilConfig& cfg) {
 
     for (int t = 0; t < cfg.timesteps; t++) {
         heat2d_fp32_kernel<<<grid, block>>>(d_u, d_u_next, N, r);
-        apply_neumann_bc<<<bc_blocks, bc_threads>>>(d_u_next, N);
-        // swap pointers instead of copying
+        apply_neumann_bc<<<bc_blocks, bc_threads>>>(d_u_next, N, R);
         float* tmp = d_u;
         d_u = d_u_next;
         d_u_next = tmp;
@@ -85,18 +91,19 @@ StencilResult run_cuda_fp32(const StencilConfig& cfg) {
     float elapsed_ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
 
-    // copy result back
     CUDA_CHECK(cudaMemcpy(h_u.data(), d_u, grid_bytes, cudaMemcpyDeviceToHost));
 
-    // each timestep reads 5 floats and writes 1 float per interior point
-    // (center + 4 neighbors read, 1 write) = 6 * 4 bytes per point
-    double bytes_per_step = (double)(N - 2) * (N - 2) * 6 * sizeof(float);
+    int interior = N - 2 * R;
+    double reads_per_point = (2 * 2 * R + 1);
+    double bytes_per_step = (double)interior * interior * (reads_per_point + 1) * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 
     StencilResult res;
     res.variant_name = "cuda_fp32";
     res.grid_size = N;
+    res.dim = cfg.dim;
+    res.stencil_reach = R;
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
