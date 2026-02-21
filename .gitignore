@@ -1,0 +1,46 @@
+# a sample gitignore file for a Python, C++, CUDA project
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C++ build files
+build/
+*.o
+*.so
+*.dylib
+*.dll
+
+# CUDA build files
+*.cu.o
+*.cubin
+*.ptx
+*.nvvmir
+*.fatbin
+
+# Distribution / packaging
+dist/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# github, vscode, and other IDE specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+.github/
