@@ -45,3 +45,11 @@ StencilResult run_cpu_fp64_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp32_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_naive_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg);
+
+// shared memory tiling variants
+StencilResult run_cuda_fp32_smem(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_naive_smem(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_kahan_smem(const StencilConfig& cfg);
+StencilResult run_cuda_fp32_smem_3d(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_naive_smem_3d(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_kahan_smem_3d(const StencilConfig& cfg);

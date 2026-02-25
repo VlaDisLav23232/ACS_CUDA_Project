@@ -24,9 +24,13 @@ add_executable(heat_stencil
     src/heat2d_cpu.cpp
     src/heat2d_cuda.cu
     src/heat2d_cuda_fp16.cu
+    src/heat2d_cuda_shared_mem_tiling.cu
+    src/heat2d_cuda_fp16_shared_mem_tiling.cu
     src/heat3d_cpu.cpp
     src/heat3d_cuda.cu
     src/heat3d_cuda_fp16.cu
+    src/heat3d_cuda_shared_mem_tiling.cu
+    src/heat3d_cuda_fp16_shared_mem_tiling.cu
     src/metrics.cpp
 )
 

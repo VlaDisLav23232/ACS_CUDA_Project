@@ -16,6 +16,13 @@ COLORS = {
     "cuda_fp32_3d":       "#2196F3",
     "cuda_fp16_naive_3d": "#FF9800",
     "cuda_fp16_kahan_3d": "#4CAF50",
+    # shared memory variants
+    "cuda_fp32_smem":          "#9C27B0",
+    "cuda_fp16_naive_smem":    "#E91E63",
+    "cuda_fp16_kahan_smem":    "#009688",
+    "cuda_fp32_smem_3d":       "#9C27B0",
+    "cuda_fp16_naive_smem_3d": "#E91E63",
+    "cuda_fp16_kahan_smem_3d": "#009688",
 }
 
 LABELS = {
@@ -27,7 +34,20 @@ LABELS = {
     "cuda_fp32_3d":       "CUDA fp32",
     "cuda_fp16_naive_3d": "CUDA fp16 naive",
     "cuda_fp16_kahan_3d": "CUDA fp16+Kahan",
+    # shared memory variants
+    "cuda_fp32_smem":          "CUDA fp32 smem",
+    "cuda_fp16_naive_smem":    "CUDA fp16 naive smem",
+    "cuda_fp16_kahan_smem":    "CUDA fp16+Kahan smem",
+    "cuda_fp32_smem_3d":       "CUDA fp32 smem",
+    "cuda_fp16_naive_smem_3d": "CUDA fp16 naive smem",
+    "cuda_fp16_kahan_smem_3d": "CUDA fp16+Kahan smem",
 }
+
+# line styles: dashed for smem variants
+LINESTYLES = {}
+for k in LABELS:
+    LINESTYLES[k] = "--" if "smem" in k else "-"
+
 
 PEAK_BW = 192.0
 
@@ -56,8 +76,9 @@ def plot_2d(df, outdir):
             sub = d2[(d2["variant"] == v) & (d2["reach"] == R)]
             if sub.empty or sub["max_abs_error"].max() == 0:
                 continue
-            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "o-",
-                        color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            ls = LINESTYLES.get(v, "-")
+            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "o",
+                        linestyle=ls, color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
@@ -73,8 +94,9 @@ def plot_2d(df, outdir):
             sub = d2[(d2["variant"] == v) & (d2["reach"] == R)]
             if sub.empty:
                 continue
-            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "o-",
-                    color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            ls = LINESTYLES.get(v, "-")
+            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "o",
+                    linestyle=ls, color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
         ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW} GB/s")
         style_ax(ax, "N", "bandwidth (GB/s)" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D effective bandwidth vs grid size", fontsize=13, fontweight="bold", y=1.02)
@@ -94,7 +116,8 @@ def plot_2d(df, outdir):
             if len(common) == 0:
                 continue
             speedup = cpu.loc[common] / sub.loc[common]
-            ax.plot(common, speedup, "o-", color=COLORS.get(v, "gray"),
+            ls = LINESTYLES.get(v, "-")
+            ax.plot(common, speedup, "o", linestyle=ls, color=COLORS.get(v, "gray"),
                     label=LABELS.get(v, v), markersize=5)
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"2D reach={R}")
@@ -120,8 +143,9 @@ def plot_3d(df, outdir):
             sub = d3[(d3["variant"] == v) & (d3["reach"] == R)]
             if sub.empty or sub["max_abs_error"].max() == 0:
                 continue
-            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "s-",
-                        color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            ls = LINESTYLES.get(v, "-")
+            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "s",
+                        linestyle=ls, color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
@@ -137,8 +161,9 @@ def plot_3d(df, outdir):
             sub = d3[(d3["variant"] == v) & (d3["reach"] == R)]
             if sub.empty:
                 continue
-            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "s-",
-                    color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            ls = LINESTYLES.get(v, "-")
+            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "s",
+                    linestyle=ls, color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
         ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW} GB/s")
         style_ax(ax, "N", "bandwidth (GB/s)" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D effective bandwidth vs grid size", fontsize=13, fontweight="bold", y=1.02)
@@ -159,7 +184,8 @@ def plot_3d(df, outdir):
             if len(common) == 0:
                 continue
             speedup = cpu.loc[common] / sub.loc[common]
-            ax.plot(common, speedup, "s-", color=COLORS.get(v, "gray"),
+            ls = LINESTYLES.get(v, "-")
+            ax.plot(common, speedup, "s", linestyle=ls, color=COLORS.get(v, "gray"),
                     label=LABELS.get(v, v), markersize=5)
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"3D reach={R}")

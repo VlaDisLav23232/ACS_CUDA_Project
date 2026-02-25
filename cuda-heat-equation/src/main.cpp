@@ -28,7 +28,7 @@ void print_usage() {
     printf("  -t <steps>      timesteps (default 5000)\n");
     printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    printf("  -v <variant>    cpu|fp32|fp16|kahan|all (default all)\n");
+    printf("  -v <variant>    cpu|fp32|fp16|kahan|fp32_smem|fp16_smem|kahan_smem|all (default all)\n");
     printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     printf("  -h              show this help\n");
 }
@@ -117,6 +117,27 @@ int main(int argc, char** argv) {
             print_summary(rk);
             write_csv_row(csv_path, rk);
         }
+        if (variant == "all" || variant == "fp32_smem") {
+            printf("\n--- CUDA fp32 (shared mem) ---\n");
+            StencilResult r32s = run_cuda_fp32_smem(cfg);
+            compute_errors(r32s, cpu_result.final_grid);
+            print_summary(r32s);
+            write_csv_row(csv_path, r32s);
+        }
+        if (variant == "all" || variant == "fp16_smem") {
+            printf("\n--- CUDA fp16 naive (shared mem) ---\n");
+            StencilResult r16s = run_cuda_fp16_naive_smem(cfg);
+            compute_errors(r16s, cpu_result.final_grid);
+            print_summary(r16s);
+            write_csv_row(csv_path, r16s);
+        }
+        if (variant == "all" || variant == "kahan_smem") {
+            printf("\n--- CUDA fp16 + Kahan (shared mem) ---\n");
+            StencilResult rks = run_cuda_fp16_kahan_smem(cfg);
+            compute_errors(rks, cpu_result.final_grid);
+            print_summary(rks);
+            write_csv_row(csv_path, rks);
+        }
     } else {
         printf("\n--- CPU fp64 reference (3D) ---\n");
         StencilResult cpu_result = run_cpu_fp64_3d(cfg);
@@ -145,6 +166,27 @@ int main(int argc, char** argv) {
             compute_errors(rk, cpu_result.final_grid);
             print_summary(rk);
             write_csv_row(csv_path, rk);
+        }
+        if (variant == "all" || variant == "fp32_smem") {
+            printf("\n--- CUDA fp32 (3D, shared mem) ---\n");
+            StencilResult r32s = run_cuda_fp32_smem_3d(cfg);
+            compute_errors(r32s, cpu_result.final_grid);
+            print_summary(r32s);
+            write_csv_row(csv_path, r32s);
+        }
+        if (variant == "all" || variant == "fp16_smem") {
+            printf("\n--- CUDA fp16 naive (3D, shared mem) ---\n");
+            StencilResult r16s = run_cuda_fp16_naive_smem_3d(cfg);
+            compute_errors(r16s, cpu_result.final_grid);
+            print_summary(r16s);
+            write_csv_row(csv_path, r16s);
+        }
+        if (variant == "all" || variant == "kahan_smem") {
+            printf("\n--- CUDA fp16 + Kahan (3D, shared mem) ---\n");
+            StencilResult rks = run_cuda_fp16_kahan_smem_3d(cfg);
+            compute_errors(rks, cpu_result.final_grid);
+            print_summary(rks);
+            write_csv_row(csv_path, rks);
         }
     }
 
