@@ -12,6 +12,7 @@ COLORS = {
     "cuda_fp32":          "#2196F3",
     "cuda_fp16_naive":    "#FF9800",
     "cuda_fp16_kahan":    "#4CAF50",
+    "cuda_fp16_kahan_reg": "#9C27B0",
     "cpu_fp64_3d":        "#333333",
     "cuda_fp32_3d":       "#2196F3",
     "cuda_fp16_naive_3d": "#FF9800",
@@ -23,6 +24,7 @@ LABELS = {
     "cuda_fp32":          "CUDA fp32",
     "cuda_fp16_naive":    "CUDA fp16 naive",
     "cuda_fp16_kahan":    "CUDA fp16+Kahan",
+    "cuda_fp16_kahan_reg": "CUDA fp16+Kahan (reg)",
     "cpu_fp64_3d":        "CPU fp64",
     "cuda_fp32_3d":       "CUDA fp32",
     "cuda_fp16_naive_3d": "CUDA fp16 naive",
@@ -191,24 +193,28 @@ def plot_combined_summary(df, outdir):
     ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW}")
     style_ax(ax, "N", "bandwidth (GB/s)", "3D fp32 bandwidth by reach")
 
-    # bottom-left: Kahan vs naive accuracy improvement (2D, largest grid per reach)
+    # bottom-left: Kahan vs naive vs kahan_reg accuracy (2D, largest grid per reach)
     ax = axes[1, 0]
     reaches = sorted(d2["reach"].unique())
     x = np.arange(len(reaches))
-    width = 0.35
+    width = 0.25
     naive_err = []
     kahan_err = []
+    kahan_reg_err = []
     for R in reaches:
         sub_n = d2[(d2["variant"] == "cuda_fp16_naive") & (d2["reach"] == R)]
         sub_k = d2[(d2["variant"] == "cuda_fp16_kahan") & (d2["reach"] == R)]
+        sub_kr = d2[(d2["variant"] == "cuda_fp16_kahan_reg") & (d2["reach"] == R)]
         naive_err.append(sub_n["max_abs_error"].iloc[-1] if len(sub_n) > 0 else 0)
         kahan_err.append(sub_k["max_abs_error"].iloc[-1] if len(sub_k) > 0 else 0)
-    bars1 = ax.bar(x - width/2, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
-    bars2 = ax.bar(x + width/2, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
+        kahan_reg_err.append(sub_kr["max_abs_error"].iloc[-1] if len(sub_kr) > 0 else 0)
+    ax.bar(x - width, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
+    ax.bar(x, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
+    ax.bar(x + width, kahan_reg_err, width, label="fp16+Kahan (reg)", color=COLORS["cuda_fp16_kahan_reg"])
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels([f"R={R}" for R in reaches])
-    style_ax(ax, "stencil reach", "max |error| (N=512)", "2D Kahan vs naive accuracy")
+    style_ax(ax, "stencil reach", "max |error| (largest N)", "2D Kahan vs naive accuracy")
 
     # bottom-right: GPU speedup over CPU, 3D N=128 across reaches
     ax = axes[1, 1]

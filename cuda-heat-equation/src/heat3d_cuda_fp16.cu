@@ -42,7 +42,7 @@ __global__ void heat3d_fp16_naive_kernel(const __half* __restrict__ u,
 
 __global__ void heat3d_fp16_kahan_kernel(const __half* __restrict__ u,
                                           __half* __restrict__ u_next,
-                                          float* __restrict__ c,
+                                          const float* __restrict__ c,
                                           float* __restrict__ c_next,
                                           int N, float r) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -164,9 +164,8 @@ StencilResult run_cuda_fp16_naive_3d(const StencilConfig& cfg) {
     for (size_t i = 0; i < total; i++)
         result_f[i] = __half2float(h_data[i]);
 
-    int interior = N - 2 * R;
-    double reads_per_point = (2 * 3 * R + 1);
-    double bytes_per_step = (double)interior * interior * interior * (reads_per_point + 1) * sizeof(__half);
+    // minimum DRAM bandwidth: each point read once, written once
+    double bytes_per_step = 2.0 * (double)N * N * N * sizeof(__half);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 
@@ -251,11 +250,8 @@ StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg) {
     for (size_t i = 0; i < total; i++)
         result_f[i] = __half2float(h_data[i]) + h_comp[i];
 
-    int interior = N - 2 * R;
-    double reads_per_point = (2 * 3 * R + 1);
-    double half_rw = (reads_per_point + 1) * sizeof(__half);
-    double comp_rw = (reads_per_point + 1) * sizeof(float);
-    double bytes_per_step = (double)interior * interior * interior * (half_rw + comp_rw);
+    // minimum DRAM bandwidth: half grid (r+w) + comp grid (r+w)
+    double bytes_per_step = 2.0 * (double)N * N * N * sizeof(__half) + 2.0 * (double)N * N * N * sizeof(float);
     double total_bw_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bw_bytes / (elapsed_ms / 1000.0) / 1e9;
 
@@ -267,7 +263,7 @@ StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
-    res.memory_bytes = 2 * half_bytes + 2 * float_bytes;
+    res.memory_bytes = 2 * half_bytes + float_bytes;  // single compensation buffer
     res.final_grid = result_f;
 
     CUDA_CHECK(cudaFree(d_u));

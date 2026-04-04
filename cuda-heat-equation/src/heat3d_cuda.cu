@@ -123,9 +123,8 @@ StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
 
     CUDA_CHECK(cudaMemcpy(h_u.data(), d_u, grid_bytes, cudaMemcpyDeviceToHost));
 
-    int interior = N - 2 * R;
-    double reads_per_point = (2 * 3 * R + 1);
-    double bytes_per_step = (double)interior * interior * interior * (reads_per_point + 1) * sizeof(float);
+    // minimum DRAM bandwidth: each point read once, written once
+    double bytes_per_step = 2.0 * (double)N * N * N * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 

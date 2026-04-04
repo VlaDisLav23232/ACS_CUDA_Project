@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 
 # Must set CUDA architectures BEFORE project() in CMake 3.18+
-# RTX 2050 = compute capability 8.6
-set(CMAKE_CUDA_ARCHITECTURES 86)
+# GTX 1650 = compute capability 7.5
+set(CMAKE_CUDA_ARCHITECTURES 75)
 
 project(heat_stencil LANGUAGES CXX CUDA)
 
