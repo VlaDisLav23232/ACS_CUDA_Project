@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Must set CUDA architectures BEFORE project() in CMake 3.18+
+# RTX 2050 = compute capability 8.6
+set(CMAKE_CUDA_ARCHITECTURES 86)
+
 project(heat_stencil LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_ARCHITECTURES 75)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # prevent nvcc from optimizing away Kahan compensation
@@ -32,5 +36,13 @@ add_executable(heat_stencil
 
 target_include_directories(heat_stencil PRIVATE include)
 
-# results directory created at config time
+# VTK visualization with proper time-stepping (standalone CUDA)
+add_executable(visualize_vtk
+    src/visualize_3d_vtk.cu
+)
+
+target_include_directories(visualize_vtk PRIVATE include)
+
+# results and output directories created at config time
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/results)
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/output)

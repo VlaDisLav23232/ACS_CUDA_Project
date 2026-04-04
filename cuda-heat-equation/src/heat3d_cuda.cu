@@ -56,6 +56,20 @@ __global__ void apply_neumann_bc_3d(float* u, int N, int R) {
     }
 }
 
+// Kernel to enforce constant temperature heat source at center
+__global__ void apply_heat_source_3d(float* u, int N, int src_start, int src_size, float temp_source) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int z = blockIdx.z * blockDim.z + threadIdx.z;
+    
+    if (x >= src_start && x < src_start + src_size &&
+        y >= src_start && y < src_start + src_size &&
+        z >= src_start && z < src_start + src_size) {
+        size_t idx = (size_t)z * N * N + y * N + x;
+        u[idx] = temp_source;
+    }
+}
+
 StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
     int N = cfg.nx;
     int R = cfg.stencil_reach;
@@ -84,6 +98,10 @@ StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
     dim3 grid3((N + BX - 1) / BX, (N + BY - 1) / BY, (N + BZ - 1) / BZ);
     dim3 bc_block(16, 16);
     dim3 bc_grid((N + 15) / 16, (N + 15) / 16);
+    
+    // Heat source grid - reuse src_size and src_start from initialization
+    dim3 src_block(8, 8, 8);
+    dim3 src_grid((src_size + 7) / 8, (src_size + 7) / 8, (src_size + 7) / 8);
 
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
@@ -93,6 +111,8 @@ StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
     for (int t = 0; t < cfg.timesteps; t++) {
         heat3d_fp32_kernel<<<grid3, block>>>(d_u, d_u_next, N, r);
         apply_neumann_bc_3d<<<bc_grid, bc_block>>>(d_u_next, N, R);
+        // IMPORTANT: Reapply constant heat source after each timestep
+        apply_heat_source_3d<<<src_grid, src_block>>>(d_u_next, N, src_start, src_size, cfg.temp_source);
         float* tmp = d_u; d_u = d_u_next; d_u_next = tmp;
     }
 
