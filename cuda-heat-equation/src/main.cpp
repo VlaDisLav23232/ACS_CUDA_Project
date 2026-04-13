@@ -28,7 +28,7 @@ void print_usage() {
     printf("  -t <steps>      timesteps (default 5000)\n");
     printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    printf("  -v <variant>    cpu|fp32|fp16|kahan|kahan_reg|all (default all)\n");
+    printf("  -v <variant>    cpu|fp32|fp16|kahan|kahan_reg|cfp16|cfp16_kahan|cfp16_kahan_reg|all (default all)\n");
     printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     printf("  -h              show this help\n");
 }
@@ -123,6 +123,27 @@ int main(int argc, char** argv) {
             compute_errors(rkr, cpu_result.final_grid);
             print_summary(rkr);
             write_csv_row(csv_path, rkr);
+        }
+        if (variant == "all" || variant == "cfp16") {
+            printf("\n--- CUDA custom fp16 (1-4-11, no Kahan) ---\n");
+            StencilResult rcf16 = run_cuda_cfp16_naive(cfg);
+            compute_errors(rcf16, cpu_result.final_grid);
+            print_summary(rcf16);
+            write_csv_row(csv_path, rcf16);
+        }
+        if (variant == "all" || variant == "cfp16_kahan") {
+            printf("\n--- CUDA custom fp16 (1-4-11) + Kahan ---\n");
+            StencilResult rcfk = run_cuda_cfp16_kahan(cfg);
+            compute_errors(rcfk, cpu_result.final_grid);
+            print_summary(rcfk);
+            write_csv_row(csv_path, rcfk);
+        }
+        if (variant == "all" || variant == "cfp16_kahan_reg") {
+            printf("\n--- CUDA custom fp16 (1-4-11) + Kahan (register-optimized) ---\n");
+            StencilResult rcfkr = run_cuda_cfp16_kahan_reg(cfg);
+            compute_errors(rcfkr, cpu_result.final_grid);
+            print_summary(rcfkr);
+            write_csv_row(csv_path, rcfkr);
         }
     } else {
         printf("\n--- CPU fp64 reference (3D) ---\n");
