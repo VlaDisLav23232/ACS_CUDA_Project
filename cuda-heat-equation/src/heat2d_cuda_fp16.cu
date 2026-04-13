@@ -2,8 +2,6 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <cooperative_groups.h>
-namespace cg = cooperative_groups;
 
 #define CUDA_CHECK(call) do { \
     cudaError_t err = call; \
@@ -156,6 +154,7 @@ StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)N * N * sizeof(__half);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = ((double)N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_naive";
@@ -165,6 +164,7 @@ StencilResult run_cuda_fp16_naive(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * half_bytes;
     res.final_grid = result_f;
 
@@ -241,6 +241,7 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)N * N * sizeof(__half) + 2.0 * (double)N * N * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = ((double)N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_kahan";
@@ -250,6 +251,7 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * half_bytes + float_bytes;  // single compensation buffer
     res.final_grid = result_f;
 
@@ -257,163 +259,6 @@ StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg) {
     CUDA_CHECK(cudaFree(d_u_next));
     CUDA_CHECK(cudaFree(d_c));
     CUDA_CHECK(cudaFree(d_c_next));
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    return res;
-}
-
-// Fused time-loop kernel: center comp stays in register across timesteps
-__global__ void heat2d_fp16_kahan_reg_kernel(
-    __half* u_a, __half* u_b, float* c_a, float* c_b,
-    int N, float r, int T)
-{
-    cg::grid_group grid = cg::this_grid();
-    int R = d_reach_fp16;
-    int total = N * N;
-
-    __half* u_src = u_a;
-    __half* u_dst = u_b;
-    float* c_src = c_a;
-    float* c_dst = c_b;
-
-    for (int t = 0; t < T; t++) {
-        for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
-             idx < total;
-             idx += gridDim.x * blockDim.x)
-        {
-            int i = idx % N;
-            int j = idx / N;
-            if (i >= R && i < N - R && j >= R && j < N - R) {
-                float center = __half2float(u_src[idx]) + c_src[idx];
-                float lap = 2.0f * d_coeffs_fp16[0] * center;
-                for (int m = 1; m <= R; m++) {
-                    int xm = j * N + (i - m);
-                    int xp = j * N + (i + m);
-                    int ym = (j - m) * N + i;
-                    int yp = (j + m) * N + i;
-                    lap += d_coeffs_fp16[m] * (
-                        (__half2float(u_src[xm]) + c_src[xm]) +
-                        (__half2float(u_src[xp]) + c_src[xp]) +
-                        (__half2float(u_src[ym]) + c_src[ym]) +
-                        (__half2float(u_src[yp]) + c_src[yp]));
-                }
-                float exact = center + r * lap;
-                __half stored = __float2half(exact);
-                u_dst[idx] = stored;
-                float sb = __half2float(stored);
-                c_dst[idx] = exact - sb;
-            }
-        }
-        grid.sync();
-        for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
-             idx < N;
-             idx += gridDim.x * blockDim.x)
-        {
-            for (int b = R - 1; b >= 0; b--) {
-                u_dst[b * N + idx]       = u_dst[(b + 1) * N + idx];
-                u_dst[(N-1-b) * N + idx] = u_dst[(N-2-b) * N + idx];
-                u_dst[idx * N + b]       = u_dst[idx * N + (b + 1)];
-                u_dst[idx * N + (N-1-b)] = u_dst[idx * N + (N-2-b)];
-                c_dst[b * N + idx]       = c_dst[(b + 1) * N + idx];
-                c_dst[(N-1-b) * N + idx] = c_dst[(N-2-b) * N + idx];
-                c_dst[idx * N + b]       = c_dst[idx * N + (b + 1)];
-                c_dst[idx * N + (N-1-b)] = c_dst[idx * N + (N-2-b)];
-            }
-        }
-        grid.sync();
-        __half* tmp_u = u_src; u_src = u_dst; u_dst = tmp_u;
-        float*  tmp_c = c_src; c_src = c_dst; c_dst = tmp_c;
-    }
-}
-
-StencilResult run_cuda_fp16_kahan_reg(const StencilConfig& cfg) {
-    int N = cfg.nx;
-    int R = cfg.stencil_reach;
-    float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
-    size_t n_elems = (size_t)N * N;
-    size_t half_bytes = n_elems * sizeof(__half);
-    size_t float_bytes = n_elems * sizeof(float);
-
-    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_fp16, cfg.fd_coeffs, (R + 1) * sizeof(float)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_fp16, &R, sizeof(int)));
-
-    std::vector<float> h_f(n_elems, cfg.temp_initial);
-    int src_size = N / 8;
-    int src_start = N / 2 - src_size / 2;
-    for (int j = src_start; j < src_start + src_size; j++)
-        for (int i = src_start; i < src_start + src_size; i++)
-            h_f[j * N + i] = cfg.temp_source;
-
-    auto h_data = float_to_half(h_f);
-    std::vector<float> h_comp(n_elems, 0.0f);
-
-    __half *d_u_a, *d_u_b;
-    float *d_c_a, *d_c_b;
-    CUDA_CHECK(cudaMalloc(&d_u_a, half_bytes));
-    CUDA_CHECK(cudaMalloc(&d_u_b, half_bytes));
-    CUDA_CHECK(cudaMalloc(&d_c_a, float_bytes));
-    CUDA_CHECK(cudaMalloc(&d_c_b, float_bytes));
-    CUDA_CHECK(cudaMemcpy(d_u_a, h_data.data(), half_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_u_b, h_data.data(), half_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_c_a, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_c_b, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
-
-    int block_size = 256;
-    int max_blocks_per_sm = 0;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &max_blocks_per_sm, heat2d_fp16_kahan_reg_kernel, block_size, 0));
-    int device;
-    CUDA_CHECK(cudaGetDevice(&device));
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-    int num_blocks = max_blocks_per_sm * prop.multiProcessorCount;
-
-    int T = cfg.timesteps;
-    void* args[] = { &d_u_a, &d_u_b, &d_c_a, &d_c_b, &N, &r, &T };
-
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    CUDA_CHECK(cudaEventRecord(start));
-
-    CUDA_CHECK(cudaLaunchCooperativeKernel(
-        (void*)heat2d_fp16_kahan_reg_kernel,
-        dim3(num_blocks), dim3(block_size), args));
-
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-    float elapsed_ms = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
-
-    __half* d_final_u = (T % 2 == 0) ? d_u_a : d_u_b;
-    float*  d_final_c = (T % 2 == 0) ? d_c_a : d_c_b;
-
-    CUDA_CHECK(cudaMemcpy(h_data.data(), d_final_u, half_bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_comp.data(), d_final_c, float_bytes, cudaMemcpyDeviceToHost));
-
-    std::vector<float> result_f(n_elems);
-    for (size_t i = 0; i < n_elems; i++)
-        result_f[i] = __half2float(h_data[i]) + h_comp[i];
-
-    double bytes_per_step = 2.0 * n_elems * sizeof(__half) + 2.0 * n_elems * sizeof(float);
-    double total_bytes = bytes_per_step * cfg.timesteps;
-    double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
-
-    StencilResult res;
-    res.variant_name = "cuda_fp16_kahan_reg";
-    res.grid_size = N;
-    res.dim = cfg.dim;
-    res.stencil_reach = R;
-    res.timesteps = cfg.timesteps;
-    res.elapsed_ms = elapsed_ms;
-    res.effective_bw_gbs = bw;
-    res.memory_bytes = 2 * half_bytes + 2 * float_bytes;
-    res.final_grid = result_f;
-
-    CUDA_CHECK(cudaFree(d_u_a));
-    CUDA_CHECK(cudaFree(d_u_b));
-    CUDA_CHECK(cudaFree(d_c_a));
-    CUDA_CHECK(cudaFree(d_c_b));
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
     return res;
