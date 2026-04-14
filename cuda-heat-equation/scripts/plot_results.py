@@ -149,6 +149,10 @@ def style_ax(ax, xlabel, ylabel, title, show_legend=True):
     ax.grid(True, alpha=0.25)
 
 
+def add_figure_hint(fig, hint_text, y=0.94):
+    fig.text(0.5, y, hint_text, ha="center", va="top", fontsize=9, color="#555555")
+
+
 def prepare_plot_df(df):
     key_cols = ["variant", "dim", "reach", "grid_size"]
     work = df.copy()
@@ -249,6 +253,7 @@ def plot_bandwidth_family_grid(df_dim, outdir, dim_label, filename):
     fig.suptitle(f"{dim_label} effective bandwidth by family and reach", fontsize=13, fontweight="bold", y=0.98)
     fig.text(0.985, 0.985, f"peak bandwidth = {PEAK_BW} GB/s", ha="right", va="top",
              fontsize=9, color=peak_color)
+    add_figure_hint(fig, "Higher is better")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/{filename}")
@@ -331,9 +336,10 @@ def plot_accuracy_bandwidth_tradeoff(df_dim, outdir, dim_label, filename):
         f"{dim_label} accuracy-performance tradeoff at N={grid_size}",
         fontsize=13,
         fontweight="bold",
-        y=1.02,
+        y=0.985,
     )
-    fig.tight_layout()
+    add_figure_hint(fig, "Lower error is better; higher bandwidth / peak is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.9])
     fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/{filename}")
 
@@ -431,6 +437,7 @@ def plot_kahan_benefit(df_dim, outdir, dim_label, metric_col, ylabel, filename, 
                         transform=ax.transAxes)
 
     fig.suptitle(f"{dim_label} {ylabel} vs naive baseline", fontsize=13, fontweight="bold", y=0.98)
+    add_figure_hint(fig, "Higher is better")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/{filename}")
@@ -502,6 +509,7 @@ def plot_error_vs_fp32(df_dim, outdir, dim_label, filename):
                         transform=ax.transAxes)
 
     fig.suptitle(f"{dim_label} error ratio vs fp32 baseline", fontsize=13, fontweight="bold", y=0.98)
+    add_figure_hint(fig, "Higher is better")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/{filename}")
@@ -532,7 +540,8 @@ def plot_2d(df, outdir):
         ax.set_yscale("log")
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
+    add_figure_hint(fig, "Lower is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(f"{outdir}/2d_accuracy.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/2d_accuracy.png")
 
@@ -556,7 +565,8 @@ def plot_2d(df, outdir):
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D GPU speedup over CPU", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
+    add_figure_hint(fig, "Higher is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(f"{outdir}/2d_speedup.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/2d_speedup.png")
 
@@ -610,7 +620,8 @@ def plot_3d(df, outdir):
         ax.set_yscale("log")
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
+    add_figure_hint(fig, "Lower is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(f"{outdir}/3d_accuracy.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/3d_accuracy.png")
 
@@ -635,7 +646,8 @@ def plot_3d(df, outdir):
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D GPU speedup over CPU", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
+    add_figure_hint(fig, "Higher is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(f"{outdir}/3d_speedup.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/3d_speedup.png")
 
@@ -756,6 +768,7 @@ def plot_combined_summary(df, outdir):
         ax.axis("off")
 
     fig.suptitle("Heat stencil benchmark summary (GTX 1650 Max-Q)", fontsize=14, fontweight="bold")
+    add_figure_hint(fig, "Panel-specific: lower error is better; higher bandwidth and speedup are better")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(f"{outdir}/summary.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/summary.png")
