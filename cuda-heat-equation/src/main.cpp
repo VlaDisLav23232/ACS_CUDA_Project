@@ -28,7 +28,7 @@ void print_usage() {
     printf("  -t <steps>      timesteps (default 5000)\n");
     printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    printf("  -v <variant>    cpu|fp32|fp16|kahan|kahan_reg|cfp16|cfp16_kahan|cfp16_kahan_tiled|cfp16_kahan_reg|all (default all)\n");
+    printf("  -v <variant>    cpu|fp32|fp16|kahan|neumaier|kahan_reg|cfp16|cfp16_kahan|cfp16_kahan_tiled|cfp16_kahan_reg|all (default all)\n");
     printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     printf("  -h              show this help\n");
 }
@@ -116,6 +116,13 @@ int main(int argc, char** argv) {
             compute_errors(rk, cpu_result.final_grid);
             print_summary(rk);
             write_csv_row(csv_path, rk);
+        }
+        if (variant == "all" || variant == "neumaier") {
+            printf("\n--- CUDA fp16 + Neumaier ---\n");
+            StencilResult rn = run_cuda_fp16_neumaier(cfg);
+            compute_errors(rn, cpu_result.final_grid);
+            print_summary(rn);
+            write_csv_row(csv_path, rn);
         }
         if (variant == "all" || variant == "kahan_reg") {
             printf("\n--- CUDA fp16 + Kahan (register-optimized) ---\n");

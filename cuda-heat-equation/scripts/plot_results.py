@@ -13,6 +13,7 @@ COLORS = {
     "cuda_fp32":          "#2F6DB3",
     "cuda_fp16_naive":    "#D97706",
     "cuda_fp16_kahan":    "#F59E0B",
+    "cuda_fp16_neumaier": "#EAB308",
     "cuda_fp16_kahan_reg": "#FBBF24",
     "cuda_cfp16_naive":   "#0F766E",
     "cuda_cfp16_kahan":   "#10B981",
@@ -29,6 +30,7 @@ LABELS = {
     "cuda_fp32":          "CUDA fp32",
     "cuda_fp16_naive":    "CUDA fp16 naive",
     "cuda_fp16_kahan":    "CUDA fp16+Kahan",
+    "cuda_fp16_neumaier": "CUDA fp16+Neumaier",
     "cuda_fp16_kahan_reg": "CUDA fp16+Kahan (reg)",
     "cuda_cfp16_naive":   "CUDA cfp16 naive",
     "cuda_cfp16_kahan":   "CUDA cfp16+Kahan",
@@ -47,6 +49,7 @@ VARIANT_ORDER = [
     "cuda_fp32",
     "cuda_fp16_naive",
     "cuda_fp16_kahan",
+    "cuda_fp16_neumaier",
     "cuda_fp16_kahan_reg",
     "cuda_cfp16_naive",
     "cuda_cfp16_kahan",
@@ -63,6 +66,7 @@ MARKERS = {
     "cuda_fp32": "o",
     "cuda_fp16_naive": "s",
     "cuda_fp16_kahan": "^",
+    "cuda_fp16_neumaier": "<",
     "cuda_fp16_kahan_reg": "D",
     "cuda_cfp16_naive": "P",
     "cuda_cfp16_kahan": "v",
@@ -79,6 +83,7 @@ LINESTYLES = {
     "cuda_fp32": "-",
     "cuda_fp16_naive": "-",
     "cuda_fp16_kahan": "--",
+    "cuda_fp16_neumaier": "-.",
     "cuda_fp16_kahan_reg": ":",
     "cuda_cfp16_naive": "-",
     "cuda_cfp16_kahan": "--",
@@ -94,6 +99,7 @@ METHOD_LABELS = {
     "cuda_fp32": "fp32",
     "cuda_fp16_naive": "naive",
     "cuda_fp16_kahan": "Kahan",
+    "cuda_fp16_neumaier": "Neumaier",
     "cuda_fp16_kahan_reg": "Kahan (reg)",
     "cuda_cfp16_naive": "naive",
     "cuda_cfp16_kahan": "Kahan",
@@ -109,6 +115,7 @@ TRADEOFF_LABELS = {
     "cuda_fp32_3d": "fp32",
     "cuda_fp16_naive": "fp16 naive",
     "cuda_fp16_kahan": "fp16 Kahan",
+    "cuda_fp16_neumaier": "fp16 Neumaier",
     "cuda_fp16_kahan_reg": "fp16 Kahan-reg",
     "cuda_fp16_naive_3d": "fp16 naive",
     "cuda_fp16_kahan_3d": "fp16 Kahan",
@@ -124,6 +131,7 @@ TRADEOFF_LABEL_OFFSETS = {
     "cuda_fp16_naive": (8, 2),
     "cuda_fp16_naive_3d": (8, 2),
     "cuda_fp16_kahan": (8, 6),
+    "cuda_fp16_neumaier": (8, -8),
     "cuda_fp16_kahan_3d": (8, 6),
     "cuda_fp16_kahan_reg": (8, 6),
     "cuda_cfp16_naive": (8, -10),
@@ -134,7 +142,7 @@ TRADEOFF_LABEL_OFFSETS = {
 
 BANDWIDTH_FAMILIES = [
     ("fp32", ["cuda_fp32", "cuda_fp32_3d"]),
-    ("fp16", ["cuda_fp16_naive", "cuda_fp16_kahan", "cuda_fp16_kahan_reg",
+    ("fp16", ["cuda_fp16_naive", "cuda_fp16_kahan", "cuda_fp16_neumaier", "cuda_fp16_kahan_reg",
               "cuda_fp16_naive_3d", "cuda_fp16_kahan_3d"]),
     ("cfp16", ["cuda_cfp16_naive", "cuda_cfp16_kahan", "cuda_cfp16_kahan_reg",
                "cuda_cfp16_kahan_tiled"]),
@@ -714,31 +722,35 @@ def plot_combined_summary(df, outdir):
         ax.text(0.5, 0.5, "No 3D data", ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
 
-    # bottom-left: Kahan vs naive vs kahan_reg accuracy (2D, largest grid per reach)
+    # bottom-left: compensated fp16 accuracy comparison (2D, largest grid per reach)
     ax = axes[1, 0]
     if not d2.empty:
         reaches = sorted(d2["reach"].unique())
         x = np.arange(len(reaches))
-        width = 0.25
+        width = 0.2
         naive_err = []
         kahan_err = []
+        neumaier_err = []
         kahan_reg_err = []
         for R in reaches:
             sub_n = d2[(d2["variant"] == "cuda_fp16_naive") & (d2["reach"] == R)]
             sub_k = d2[(d2["variant"] == "cuda_fp16_kahan") & (d2["reach"] == R)]
+            sub_ne = d2[(d2["variant"] == "cuda_fp16_neumaier") & (d2["reach"] == R)]
             sub_kr = d2[(d2["variant"] == "cuda_fp16_kahan_reg") & (d2["reach"] == R)]
             naive_err.append(sub_n["max_abs_error"].iloc[-1] if len(sub_n) > 0 else 0)
             kahan_err.append(sub_k["max_abs_error"].iloc[-1] if len(sub_k) > 0 else 0)
+            neumaier_err.append(sub_ne["max_abs_error"].iloc[-1] if len(sub_ne) > 0 else 0)
             kahan_reg_err.append(sub_kr["max_abs_error"].iloc[-1] if len(sub_kr) > 0 else 0)
-        ax.bar(x - width, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
-        ax.bar(x, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
-        ax.bar(x + width, kahan_reg_err, width, label="fp16+Kahan (reg)", color=COLORS["cuda_fp16_kahan_reg"])
+        ax.bar(x - 1.5 * width, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
+        ax.bar(x - 0.5 * width, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
+        ax.bar(x + 0.5 * width, neumaier_err, width, label="fp16+Neumaier", color=COLORS["cuda_fp16_neumaier"])
+        ax.bar(x + 1.5 * width, kahan_reg_err, width, label="fp16+Kahan (reg)", color=COLORS["cuda_fp16_kahan_reg"])
         ax.set_yscale("log")
         ax.set_xticks(x)
         ax.set_xticklabels([f"R={R}" for R in reaches])
-        style_ax(ax, "stencil reach", "max |error| (largest N)", "2D Kahan vs naive accuracy")
+        style_ax(ax, "stencil reach", "max |error| (largest N)", "2D compensated fp16 accuracy")
     else:
-        ax.set_title("2D Kahan vs naive accuracy")
+        ax.set_title("2D compensated fp16 accuracy")
         ax.text(0.5, 0.5, "No 2D data", ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
 
