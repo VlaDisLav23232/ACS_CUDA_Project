@@ -112,6 +112,60 @@ __global__ void heat2d_cfp16_kahan_kernel(const cfp16_t* __restrict__ u,
     }
 }
 
+__global__ void heat2d_cfp16_kahan_tiled_kernel(const cfp16_t* __restrict__ u,
+                                                cfp16_t* __restrict__ u_next,
+                                                const float* __restrict__ c,
+                                                float* __restrict__ c_next,
+                                                int N, float r) {
+    __shared__ float s_u[BLOCK_Y + 2 * MAX_REACH][BLOCK_X + 2 * MAX_REACH];
+    __shared__ float s_c[BLOCK_Y + 2 * MAX_REACH][BLOCK_X + 2 * MAX_REACH];
+
+    int R = d_reach_cfp16;
+    int tile_w = blockDim.x + 2 * R;
+    int tile_h = blockDim.y + 2 * R;
+    int tile_elems = tile_w * tile_h;
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    int base_i = blockIdx.x * blockDim.x - R;
+    int base_j = blockIdx.y * blockDim.y - R;
+
+    for (int linear = tid; linear < tile_elems; linear += blockDim.x * blockDim.y) {
+        int local_x = linear % tile_w;
+        int local_y = linear / tile_w;
+        int global_x = base_i + local_x;
+        int global_y = base_j + local_y;
+        global_x = max(0, min(global_x, N - 1));
+        global_y = max(0, min(global_y, N - 1));
+        int global_idx = global_y * N + global_x;
+        s_u[local_y][local_x] = cfp16_to_float(u[global_idx]);
+        s_c[local_y][local_x] = c[global_idx];
+    }
+    __syncthreads();
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i >= R && i < N - R && j >= R && j < N - R) {
+        int idx = j * N + i;
+        int li = threadIdx.x + R;
+        int lj = threadIdx.y + R;
+        float center = s_u[lj][li] + s_c[lj][li];
+        float lap = 2.0f * d_coeffs_cfp16[0] * center;
+        for (int m = 1; m <= R; m++) {
+            float xm = s_u[lj][li - m] + s_c[lj][li - m];
+            float xp = s_u[lj][li + m] + s_c[lj][li + m];
+            float ym = s_u[lj - m][li] + s_c[lj - m][li];
+            float yp = s_u[lj + m][li] + s_c[lj + m][li];
+            lap += d_coeffs_cfp16[m] * (xm + xp + ym + yp);
+        }
+        float exact_result = center + r * lap;
+        cfp16_t stored = float_to_cfp16(exact_result);
+        u_next[idx] = stored;
+        float stored_back = cfp16_to_float(stored);
+        c_next[idx] = exact_result - stored_back;
+    }
+}
+
 __global__ void apply_neumann_bc_cfp16(cfp16_t* u, int N, int R) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
@@ -303,6 +357,88 @@ StencilResult run_cuda_cfp16_kahan(const StencilConfig& cfg) {
 
     StencilResult res;
     res.variant_name = "cuda_cfp16_kahan";
+    res.grid_size = N;
+    res.dim = cfg.dim;
+    res.stencil_reach = R;
+    res.timesteps = cfg.timesteps;
+    res.elapsed_ms = elapsed_ms;
+    res.effective_bw_gbs = bw;
+    res.memory_bytes = 2 * cfp16_bytes + float_bytes;
+    res.final_grid = result_f;
+
+    CUDA_CHECK(cudaFree(d_u));
+    CUDA_CHECK(cudaFree(d_u_next));
+    CUDA_CHECK(cudaFree(d_c));
+    CUDA_CHECK(cudaFree(d_c_next));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    return res;
+}
+
+StencilResult run_cuda_cfp16_kahan_tiled(const StencilConfig& cfg) {
+    int N = cfg.nx;
+    int R = cfg.stencil_reach;
+    float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
+    size_t n_elems = static_cast<size_t>(N) * N;
+    size_t cfp16_bytes = n_elems * sizeof(cfp16_t);
+    size_t float_bytes = n_elems * sizeof(float);
+    float normalization_scale = cfp16_normalization_scale(cfg);
+
+    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_cfp16, cfg.fd_coeffs, (R + 1) * sizeof(float)));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_cfp16, &R, sizeof(int)));
+
+    std::vector<float> h_f = make_normalized_initial_grid(cfg, normalization_scale);
+    auto h_data = float_to_cfp16_vector(h_f);
+    std::vector<float> h_comp(n_elems, 0.0f);
+
+    cfp16_t *d_u, *d_u_next;
+    float *d_c, *d_c_next;
+    CUDA_CHECK(cudaMalloc(&d_u, cfp16_bytes));
+    CUDA_CHECK(cudaMalloc(&d_u_next, cfp16_bytes));
+    CUDA_CHECK(cudaMalloc(&d_c, float_bytes));
+    CUDA_CHECK(cudaMalloc(&d_c_next, float_bytes));
+    CUDA_CHECK(cudaMemcpy(d_u, h_data.data(), cfp16_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_u_next, h_data.data(), cfp16_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_c, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_c_next, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
+
+    dim3 block(BLOCK_X, BLOCK_Y);
+    dim3 grid((N + BLOCK_X - 1) / BLOCK_X, (N + BLOCK_Y - 1) / BLOCK_Y);
+    int bc_threads = 256;
+    int bc_blocks = (N + bc_threads - 1) / bc_threads;
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+
+    for (int t = 0; t < cfg.timesteps; t++) {
+        heat2d_cfp16_kahan_tiled_kernel<<<grid, block>>>(d_u, d_u_next, d_c, d_c_next, N, r);
+        apply_neumann_bc_cfp16<<<bc_blocks, bc_threads>>>(d_u_next, N, R);
+        apply_neumann_bc_comp_cfp16<<<bc_blocks, bc_threads>>>(d_c_next, N, R);
+        cfp16_t* tmp_h = d_u; d_u = d_u_next; d_u_next = tmp_h;
+        float* tmp_c = d_c; d_c = d_c_next; d_c_next = tmp_c;
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float elapsed_ms = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+
+    CUDA_CHECK(cudaMemcpy(h_data.data(), d_u, cfp16_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_comp.data(), d_c, float_bytes, cudaMemcpyDeviceToHost));
+
+    std::vector<float> result_f(n_elems);
+    for (size_t i = 0; i < n_elems; i++)
+        result_f[i] = (cfp16_to_float(h_data[i]) + h_comp[i]) * normalization_scale;
+
+    double bytes_per_step = 2.0 * static_cast<double>(N) * N * sizeof(cfp16_t)
+                          + 2.0 * static_cast<double>(N) * N * sizeof(float);
+    double total_bytes = bytes_per_step * cfg.timesteps;
+    double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+
+    StencilResult res;
+    res.variant_name = "cuda_cfp16_kahan_tiled";
     res.grid_size = N;
     res.dim = cfg.dim;
     res.stencil_reach = R;
