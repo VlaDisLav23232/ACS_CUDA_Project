@@ -6,17 +6,22 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
+from adjustText import adjust_text
 
 COLORS = {
     "cpu_fp64":           "#333333",
-    "cuda_fp32":          "#2196F3",
-    "cuda_fp16_naive":    "#FF9800",
-    "cuda_fp16_kahan":    "#4CAF50",
-    "cuda_fp16_kahan_reg": "#9C27B0",
+    "cuda_fp32":          "#2F6DB3",
+    "cuda_fp16_naive":    "#D97706",
+    "cuda_fp16_kahan":    "#F59E0B",
+    "cuda_fp16_kahan_reg": "#FBBF24",
+    "cuda_cfp16_naive":   "#0F766E",
+    "cuda_cfp16_kahan":   "#10B981",
+    "cuda_cfp16_kahan_reg": "#34D399",
+    "cuda_cfp16_kahan_tiled": "#7A7A7A",
     "cpu_fp64_3d":        "#333333",
-    "cuda_fp32_3d":       "#2196F3",
-    "cuda_fp16_naive_3d": "#FF9800",
-    "cuda_fp16_kahan_3d": "#4CAF50",
+    "cuda_fp32_3d":       "#2F6DB3",
+    "cuda_fp16_naive_3d": "#D97706",
+    "cuda_fp16_kahan_3d": "#F59E0B",
 }
 
 LABELS = {
@@ -25,6 +30,10 @@ LABELS = {
     "cuda_fp16_naive":    "CUDA fp16 naive",
     "cuda_fp16_kahan":    "CUDA fp16+Kahan",
     "cuda_fp16_kahan_reg": "CUDA fp16+Kahan (reg)",
+    "cuda_cfp16_naive":   "CUDA cfp16 naive",
+    "cuda_cfp16_kahan":   "CUDA cfp16+Kahan",
+    "cuda_cfp16_kahan_reg": "CUDA cfp16+Kahan (reg)",
+    "cuda_cfp16_kahan_tiled": "CUDA cfp16+Kahan tiled",
     "cpu_fp64_3d":        "CPU fp64",
     "cuda_fp32_3d":       "CUDA fp32",
     "cuda_fp16_naive_3d": "CUDA fp16 naive",
@@ -33,18 +42,477 @@ LABELS = {
 
 PEAK_BW = 192.0
 
+VARIANT_ORDER = [
+    "cpu_fp64",
+    "cuda_fp32",
+    "cuda_fp16_naive",
+    "cuda_fp16_kahan",
+    "cuda_fp16_kahan_reg",
+    "cuda_cfp16_naive",
+    "cuda_cfp16_kahan",
+    "cuda_cfp16_kahan_reg",
+    "cuda_cfp16_kahan_tiled",
+    "cpu_fp64_3d",
+    "cuda_fp32_3d",
+    "cuda_fp16_naive_3d",
+    "cuda_fp16_kahan_3d",
+]
 
-def style_ax(ax, xlabel, ylabel, title):
+MARKERS = {
+    "cpu_fp64": "X",
+    "cuda_fp32": "o",
+    "cuda_fp16_naive": "s",
+    "cuda_fp16_kahan": "^",
+    "cuda_fp16_kahan_reg": "D",
+    "cuda_cfp16_naive": "P",
+    "cuda_cfp16_kahan": "v",
+    "cuda_cfp16_kahan_reg": ">",
+    "cuda_cfp16_kahan_tiled": "o",
+    "cpu_fp64_3d": "X",
+    "cuda_fp32_3d": "o",
+    "cuda_fp16_naive_3d": "s",
+    "cuda_fp16_kahan_3d": "^",
+}
+
+LINESTYLES = {
+    "cpu_fp64": "-",
+    "cuda_fp32": "-",
+    "cuda_fp16_naive": "-",
+    "cuda_fp16_kahan": "--",
+    "cuda_fp16_kahan_reg": ":",
+    "cuda_cfp16_naive": "-",
+    "cuda_cfp16_kahan": "--",
+    "cuda_cfp16_kahan_reg": ":",
+    "cuda_cfp16_kahan_tiled": "-.",
+    "cpu_fp64_3d": "-",
+    "cuda_fp32_3d": "-",
+    "cuda_fp16_naive_3d": "--",
+    "cuda_fp16_kahan_3d": "-.",
+}
+
+METHOD_LABELS = {
+    "cuda_fp32": "fp32",
+    "cuda_fp16_naive": "naive",
+    "cuda_fp16_kahan": "Kahan",
+    "cuda_fp16_kahan_reg": "Kahan (reg)",
+    "cuda_cfp16_naive": "naive",
+    "cuda_cfp16_kahan": "Kahan",
+    "cuda_cfp16_kahan_reg": "Kahan (reg)",
+    "cuda_cfp16_kahan_tiled": "Kahan (tiled)",
+    "cuda_fp32_3d": "fp32",
+    "cuda_fp16_naive_3d": "naive",
+    "cuda_fp16_kahan_3d": "Kahan",
+}
+
+TRADEOFF_LABELS = {
+    "cuda_fp32": "fp32",
+    "cuda_fp32_3d": "fp32",
+    "cuda_fp16_naive": "fp16 naive",
+    "cuda_fp16_kahan": "fp16 Kahan",
+    "cuda_fp16_kahan_reg": "fp16 Kahan-reg",
+    "cuda_fp16_naive_3d": "fp16 naive",
+    "cuda_fp16_kahan_3d": "fp16 Kahan",
+    "cuda_cfp16_naive": "cfp16 naive",
+    "cuda_cfp16_kahan": "cfp16 Kahan",
+    "cuda_cfp16_kahan_reg": "cfp16 Kahan-reg",
+    "cuda_cfp16_kahan_tiled": "cfp16 Kahan-tiled",
+}
+
+TRADEOFF_LABEL_OFFSETS = {
+    "cuda_fp32": (7, 4),
+    "cuda_fp32_3d": (7, 4),
+    "cuda_fp16_naive": (8, 2),
+    "cuda_fp16_naive_3d": (8, 2),
+    "cuda_fp16_kahan": (8, 6),
+    "cuda_fp16_kahan_3d": (8, 6),
+    "cuda_fp16_kahan_reg": (8, 6),
+    "cuda_cfp16_naive": (8, -10),
+    "cuda_cfp16_kahan": (8, 4),
+    "cuda_cfp16_kahan_reg": (8, -10),
+    "cuda_cfp16_kahan_tiled": (8, 6),
+}
+
+BANDWIDTH_FAMILIES = [
+    ("fp32", ["cuda_fp32", "cuda_fp32_3d"]),
+    ("fp16", ["cuda_fp16_naive", "cuda_fp16_kahan", "cuda_fp16_kahan_reg",
+              "cuda_fp16_naive_3d", "cuda_fp16_kahan_3d"]),
+    ("cfp16", ["cuda_cfp16_naive", "cuda_cfp16_kahan", "cuda_cfp16_kahan_reg",
+               "cuda_cfp16_kahan_tiled"]),
+]
+
+def style_ax(ax, xlabel, ylabel, title, show_legend=True):
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
     ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.legend(fontsize=8, loc="best")
+    if show_legend:
+        ax.legend(fontsize=8, loc="best", frameon=True, framealpha=0.9)
     ax.grid(True, alpha=0.25)
+
+
+def prepare_plot_df(df):
+    key_cols = ["variant", "dim", "reach", "grid_size"]
+    work = df.copy()
+    if "timestamp" in work.columns:
+        work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+        work = work.sort_values(key_cols + ["timestamp", "timesteps"])
+    else:
+        work = work.sort_values(key_cols + ["timesteps"])
+    return work.groupby(key_cols, as_index=False).tail(1).copy()
+
+
+def variant_sort_key(variant):
+    if variant in VARIANT_ORDER:
+        return (0, VARIANT_ORDER.index(variant))
+    return (1, variant)
+
+
+def plot_variant(ax, x, y, variant, label=None, color=None, marker=None, linestyle=None):
+    ax.plot(
+        x, y,
+        color=color or COLORS.get(variant, "gray"),
+        label=label or LABELS.get(variant, variant),
+        marker=MARKERS.get(variant, "o") if marker is None else marker,
+        linestyle=linestyle or LINESTYLES.get(variant, "-"),
+        markersize=4,
+        linewidth=1.8,
+        alpha=0.9,
+        markerfacecolor="white",
+        markeredgewidth=1.2,
+    )
+
+
+def family_variants_for_dim(df_dim, family_name):
+    family_variants = []
+    family_set = None
+    for name, variants in BANDWIDTH_FAMILIES:
+        if name == family_name:
+            family_set = set(variants)
+            break
+    if family_set is None:
+        return family_variants
+    for variant in sorted(df_dim["variant"].unique(), key=variant_sort_key):
+        if variant in family_set:
+            family_variants.append(variant)
+    return family_variants
+
+
+def plot_bandwidth_family_grid(df_dim, outdir, dim_label, filename):
+    reaches = sorted(df_dim["reach"].unique())
+    fig, axes = plt.subplots(
+        len(BANDWIDTH_FAMILIES),
+        len(reaches),
+        figsize=(4.2 * len(reaches), 3.2 * len(BANDWIDTH_FAMILIES)),
+        sharex=False,
+        sharey=True,
+    )
+    axes = np.array(axes, dtype=object).reshape(len(BANDWIDTH_FAMILIES), len(reaches))
+
+    peak_color = "#C97E7E"
+    peak_alpha = 0.35
+
+    for row_idx, (family_name, _) in enumerate(BANDWIDTH_FAMILIES):
+        family_variants = family_variants_for_dim(df_dim, family_name)
+        for col_idx, reach in enumerate(reaches):
+            ax = axes[row_idx, col_idx]
+            plotted = False
+            for variant in family_variants:
+                sub = df_dim[(df_dim["variant"] == variant) & (df_dim["reach"] == reach)]
+                if sub.empty:
+                    continue
+                sub = sub.sort_values("grid_size")
+                plot_variant(
+                    ax,
+                    sub["grid_size"],
+                    sub["bandwidth_gbs"],
+                    variant,
+                    label=METHOD_LABELS.get(variant, LABELS.get(variant, variant)),
+                    marker="",
+                )
+                plotted = True
+
+            ax.axhline(y=PEAK_BW, color=peak_color, linestyle="--", linewidth=0.9, alpha=peak_alpha, zorder=0)
+            if plotted:
+                style_ax(
+                    ax,
+                    "N" if row_idx == len(BANDWIDTH_FAMILIES) - 1 else "",
+                    "bandwidth (GB/s)" if col_idx == 0 else "",
+                    f"{family_name}, reach={reach}",
+                )
+            else:
+                ax.set_title(f"{family_name}, reach={reach}", fontsize=11, fontweight="bold")
+                ax.grid(True, alpha=0.25)
+                ax.set_ylabel("bandwidth (GB/s)" if col_idx == 0 else "", fontsize=10)
+                ax.set_xlabel("N" if row_idx == len(BANDWIDTH_FAMILIES) - 1 else "", fontsize=10)
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=10, color="#666666",
+                        transform=ax.transAxes)
+
+    fig.suptitle(f"{dim_label} effective bandwidth by family and reach", fontsize=13, fontweight="bold", y=0.98)
+    fig.text(0.985, 0.985, f"peak bandwidth = {PEAK_BW} GB/s", ha="right", va="top",
+             fontsize=9, color=peak_color)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
+
+
+def pick_tradeoff_grid_size(df_dim, preferred=512):
+    grid_sizes = sorted(df_dim["grid_size"].unique())
+    if preferred in grid_sizes:
+        return preferred
+    return grid_sizes[-1]
+
+
+def plot_accuracy_bandwidth_tradeoff(df_dim, outdir, dim_label, filename):
+    reaches = sorted(df_dim["reach"].unique())
+    grid_size = pick_tradeoff_grid_size(df_dim)
+    plot_df = df_dim[(df_dim["grid_size"] == grid_size) & (~df_dim["variant"].str.contains("cpu"))].copy()
+    if plot_df.empty:
+        print(f"  skipped {filename}: no GPU rows found at N={grid_size}")
+        return
+
+    fig, axes = plt.subplots(1, len(reaches), figsize=(4.6 * len(reaches), 4.0), sharey=True)
+    if len(reaches) == 1:
+        axes = [axes]
+
+    for ax, reach in zip(axes, reaches):
+        sub = plot_df[plot_df["reach"] == reach].copy()
+        if sub.empty:
+            ax.set_title(f"{dim_label} reach={reach}", fontsize=11, fontweight="bold")
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.grid(True, alpha=0.25)
+            continue
+
+        sub = sub.sort_values("max_abs_error")
+        texts = []
+        for _, row in sub.iterrows():
+            variant = row["variant"]
+            x = row["max_abs_error"]
+            y = row["bandwidth_gbs"] / PEAK_BW
+            ax.scatter(
+                x,
+                y,
+                s=70,
+                color=COLORS.get(variant, "gray"),
+                marker=MARKERS.get(variant, "o"),
+                alpha=0.95,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+            )
+            dx, dy = TRADEOFF_LABEL_OFFSETS.get(variant, (6, 4))
+            text = ax.text(
+                x * (1.0 + dx * 0.002),
+                y + dy * 0.002,
+                TRADEOFF_LABELS.get(variant, METHOD_LABELS.get(variant, LABELS.get(variant, variant))),
+                fontsize=8,
+                color=COLORS.get(variant, "gray"),
+            )
+            texts.append(text)
+
+        adjust_text(
+            texts,
+            ax=ax,
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.5, alpha=0.7),
+            expand=(1.2, 1.4),
+            force_text=(0.5, 0.8),
+            force_static=(0.4, 0.7),
+            only_move={"points": "y", "text": "xy"},
+        )
+
+        ax.set_xscale("log")
+        style_ax(
+            ax,
+            "max |error|",
+            "bandwidth / peak" if reach == reaches[0] else "",
+            f"{dim_label} reach={reach}",
+            show_legend=False,
+        )
+
+    fig.suptitle(
+        f"{dim_label} accuracy-performance tradeoff at N={grid_size}",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+    fig.tight_layout()
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
+
+
+def ratio_label(numerator_variant, denominator_variant):
+    numerator = METHOD_LABELS.get(numerator_variant, LABELS.get(numerator_variant, numerator_variant))
+    denominator = METHOD_LABELS.get(denominator_variant, LABELS.get(denominator_variant, denominator_variant))
+    return f"{numerator} / {denominator}"
+
+
+def build_ratio_series(df_dim, reach, base_variant, compare_variant, value_col, invert=False):
+    base = df_dim[(df_dim["variant"] == base_variant) & (df_dim["reach"] == reach)].set_index("grid_size")[value_col]
+    comp = df_dim[(df_dim["variant"] == compare_variant) & (df_dim["reach"] == reach)].set_index("grid_size")[value_col]
+    common = base.index.intersection(comp.index)
+    if len(common) == 0:
+        return None, None
+    common = common.sort_values()
+    if invert:
+        ratio = base.loc[common] / comp.loc[common]
+    else:
+        ratio = comp.loc[common] / base.loc[common]
+    return common, ratio
+
+
+def family_naive_comparisons(df_dim):
+    families = []
+    available_variants = set(df_dim["variant"].unique())
+    for family_name in ["fp16", "cfp16"]:
+        family_variants = family_variants_for_dim(df_dim, family_name)
+        base_variant = next((v for v in family_variants if "naive" in v), None)
+        if base_variant is None or base_variant not in available_variants:
+            continue
+        compare_variants = [v for v in family_variants if v != base_variant and v in available_variants]
+        if compare_variants:
+            families.append((family_name, base_variant, compare_variants))
+    return families
+
+
+def plot_kahan_benefit(df_dim, outdir, dim_label, metric_col, ylabel, filename, invert=False):
+    reaches = sorted(df_dim["reach"].unique())
+    families = family_naive_comparisons(df_dim)
+    if not families:
+        print(f"  skipped {filename}: no mitigation/naive comparisons found")
+        return
+
+    fig, axes = plt.subplots(
+        len(families),
+        len(reaches),
+        figsize=(4.4 * len(reaches), 3.3 * len(families)),
+        sharex=False,
+        sharey=True,
+    )
+    axes = np.array(axes, dtype=object).reshape(len(families), len(reaches))
+
+    for row_idx, (family_name, base_variant, compare_variants) in enumerate(families):
+        for col_idx, reach in enumerate(reaches):
+            ax = axes[row_idx, col_idx]
+            plotted = False
+            for compare_variant in compare_variants:
+                x, ratio = build_ratio_series(
+                    df_dim,
+                    reach,
+                    base_variant,
+                    compare_variant,
+                    metric_col,
+                    invert=invert,
+                )
+                if x is None:
+                    continue
+                plot_variant(
+                    ax,
+                    x,
+                    ratio,
+                    compare_variant,
+                    label=ratio_label(base_variant if invert else compare_variant,
+                                      compare_variant if invert else base_variant),
+                    marker=None,
+                )
+                plotted = True
+
+            ax.axhline(y=1.0, color="#888888", linestyle=":", linewidth=1.0, alpha=0.7, zorder=0)
+            if plotted:
+                style_ax(
+                    ax,
+                    "N" if row_idx == len(families) - 1 else "",
+                    ylabel if col_idx == 0 else "",
+                    f"{family_name}, reach={reach}",
+                )
+            else:
+                ax.set_title(f"{family_name}, reach={reach}", fontsize=11, fontweight="bold")
+                ax.grid(True, alpha=0.25)
+                ax.set_ylabel(ylabel if col_idx == 0 else "", fontsize=10)
+                ax.set_xlabel("N" if row_idx == len(families) - 1 else "", fontsize=10)
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=10, color="#666666",
+                        transform=ax.transAxes)
+
+    fig.suptitle(f"{dim_label} {ylabel} vs naive baseline", fontsize=13, fontweight="bold", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
+
+
+def plot_error_vs_fp32(df_dim, outdir, dim_label, filename):
+    reaches = sorted(df_dim["reach"].unique())
+    variants = sorted([v for v in df_dim["variant"].unique() if "cpu" not in v], key=variant_sort_key)
+    fp32_variant = "cuda_fp32" if dim_label == "2D" else "cuda_fp32_3d"
+    families = []
+    for family_name in ["fp16", "cfp16"]:
+        compare_variants = [v for v in family_variants_for_dim(df_dim, family_name) if v != fp32_variant]
+        if compare_variants:
+            families.append((family_name, compare_variants))
+    if fp32_variant not in variants or not families:
+        print(f"  skipped {filename}: no fp32 comparison set found")
+        return
+
+    fig, axes = plt.subplots(
+        len(families),
+        len(reaches),
+        figsize=(4.4 * len(reaches), 3.3 * len(families)),
+        sharex=False,
+        sharey=True,
+    )
+    axes = np.array(axes, dtype=object).reshape(len(families), len(reaches))
+
+    for row_idx, (family_name, compare_variants) in enumerate(families):
+        for col_idx, reach in enumerate(reaches):
+            ax = axes[row_idx, col_idx]
+            plotted = False
+            for variant in compare_variants:
+                x, ratio = build_ratio_series(
+                    df_dim,
+                    reach,
+                    fp32_variant,
+                    variant,
+                    "max_abs_error",
+                    invert=True,
+                )
+                if x is None:
+                    continue
+                plot_variant(
+                    ax,
+                    x,
+                    ratio,
+                    variant,
+                    label=ratio_label(fp32_variant, variant),
+                    marker=None,
+                )
+                plotted = True
+
+            ax.axhline(y=1.0, color="#888888", linestyle=":", linewidth=1.0, alpha=0.7, zorder=0)
+            if plotted:
+                ax.set_xscale("log")
+                ax.set_yscale("log")
+                style_ax(
+                    ax,
+                    "N" if row_idx == len(families) - 1 else "",
+                    "error_fp32 / error_variant" if col_idx == 0 else "",
+                    f"{family_name}, reach={reach}",
+                )
+            else:
+                ax.set_title(f"{family_name}, reach={reach}", fontsize=11, fontweight="bold")
+                ax.grid(True, alpha=0.25)
+                ax.set_xlabel("N" if row_idx == len(families) - 1 else "", fontsize=10)
+                ax.set_ylabel("error_fp32 / error_variant" if col_idx == 0 else "", fontsize=10)
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=10, color="#666666",
+                        transform=ax.transAxes)
+
+    fig.suptitle(f"{dim_label} error ratio vs fp32 baseline", fontsize=13, fontweight="bold", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
 
 
 def plot_2d(df, outdir):
     d2 = df[df["dim"] == 2].copy()
-    gpu_variants = [v for v in d2["variant"].unique() if "cpu" not in v]
+    if d2.empty:
+        print("  skipped 2D plots: no 2D rows found")
+        return
+    gpu_variants = sorted([v for v in d2["variant"].unique() if "cpu" not in v], key=variant_sort_key)
     reaches = sorted(d2["reach"].unique())
 
     # figure 1: accuracy vs grid size (one subplot per reach)
@@ -52,37 +520,24 @@ def plot_2d(df, outdir):
     if len(reaches) == 1:
         axes = [axes]
     for ax, R in zip(axes, reaches):
-        for v in d2["variant"].unique():
+        for v in sorted(d2["variant"].unique(), key=variant_sort_key):
             if v == "cpu_fp64":
                 continue
             sub = d2[(d2["variant"] == v) & (d2["reach"] == R)]
             if sub.empty or sub["max_abs_error"].max() == 0:
                 continue
-            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "o-",
-                        color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            sub = sub.sort_values("grid_size")
+            plot_variant(ax, sub["grid_size"], sub["max_abs_error"], v)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     fig.savefig(f"{outdir}/2d_accuracy.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/2d_accuracy.png")
 
-    # figure 2: bandwidth vs grid size (one subplot per reach)
-    fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
-    if len(reaches) == 1:
-        axes = [axes]
-    for ax, R in zip(axes, reaches):
-        for v in gpu_variants:
-            sub = d2[(d2["variant"] == v) & (d2["reach"] == R)]
-            if sub.empty:
-                continue
-            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "o-",
-                    color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
-        ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW} GB/s")
-        style_ax(ax, "N", "bandwidth (GB/s)" if R == reaches[0] else "", f"2D reach={R}")
-    fig.suptitle("2D effective bandwidth vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
-    fig.savefig(f"{outdir}/2d_bandwidth.png", dpi=150, bbox_inches="tight")
-    print(f"  saved {outdir}/2d_bandwidth.png")
+    # figure 2: bandwidth by precision family and reach
+    plot_bandwidth_family_grid(d2, outdir, "2D", "2d_bandwidth.png")
 
     # figure 3: speedup vs CPU
     fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
@@ -95,9 +550,9 @@ def plot_2d(df, outdir):
             common = cpu.index.intersection(sub.index)
             if len(common) == 0:
                 continue
+            common = common.sort_values()
             speedup = cpu.loc[common] / sub.loc[common]
-            ax.plot(common, speedup, "o-", color=COLORS.get(v, "gray"),
-                    label=LABELS.get(v, v), markersize=5)
+            plot_variant(ax, common, speedup, v)
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"2D reach={R}")
     fig.suptitle("2D GPU speedup over CPU", fontsize=13, fontweight="bold", y=1.02)
@@ -105,10 +560,37 @@ def plot_2d(df, outdir):
     fig.savefig(f"{outdir}/2d_speedup.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/2d_speedup.png")
 
+    # figure 4: accuracy-performance tradeoff at fixed N
+    plot_accuracy_bandwidth_tradeoff(d2, outdir, "2D", "2d_accuracy_bandwidth_tradeoff.png")
+
+    # figure 5: normalized Kahan benefit
+    plot_kahan_benefit(
+        d2,
+        outdir,
+        "2D",
+        "max_abs_error",
+        "error improvement (error_naive / error_variant)",
+        "2d_kahan_error_improvement.png",
+        invert=True,
+    )
+    plot_kahan_benefit(
+        d2,
+        outdir,
+        "2D",
+        "bandwidth_gbs",
+        "bandwidth ratio (bandwidth_variant / bandwidth_naive)",
+        "2d_kahan_bandwidth_ratio.png",
+        invert=False,
+    )
+    plot_error_vs_fp32(d2, outdir, "2D", "2d_error_fp32_over_variant.png")
+
 
 def plot_3d(df, outdir):
     d3 = df[df["dim"] == 3].copy()
-    gpu_variants = [v for v in d3["variant"].unique() if "cpu" not in v]
+    if d3.empty:
+        print("  skipped 3D plots: no 3D rows found")
+        return
+    gpu_variants = sorted([v for v in d3["variant"].unique() if "cpu" not in v], key=variant_sort_key)
     reaches = sorted(d3["reach"].unique())
 
     # figure 4: 3D accuracy
@@ -116,37 +598,24 @@ def plot_3d(df, outdir):
     if len(reaches) == 1:
         axes = [axes]
     for ax, R in zip(axes, reaches):
-        for v in d3["variant"].unique():
+        for v in sorted(d3["variant"].unique(), key=variant_sort_key):
             if "cpu" in v:
                 continue
             sub = d3[(d3["variant"] == v) & (d3["reach"] == R)]
             if sub.empty or sub["max_abs_error"].max() == 0:
                 continue
-            ax.semilogy(sub["grid_size"], sub["max_abs_error"], "s-",
-                        color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
+            sub = sub.sort_values("grid_size")
+            plot_variant(ax, sub["grid_size"], sub["max_abs_error"], v)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
         style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     fig.savefig(f"{outdir}/3d_accuracy.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/3d_accuracy.png")
 
-    # figure 5: 3D bandwidth
-    fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
-    if len(reaches) == 1:
-        axes = [axes]
-    for ax, R in zip(axes, reaches):
-        for v in gpu_variants:
-            sub = d3[(d3["variant"] == v) & (d3["reach"] == R)]
-            if sub.empty:
-                continue
-            ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "s-",
-                    color=COLORS.get(v, "gray"), label=LABELS.get(v, v), markersize=5)
-        ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW} GB/s")
-        style_ax(ax, "N", "bandwidth (GB/s)" if R == reaches[0] else "", f"3D reach={R}")
-    fig.suptitle("3D effective bandwidth vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    fig.tight_layout()
-    fig.savefig(f"{outdir}/3d_bandwidth.png", dpi=150, bbox_inches="tight")
-    print(f"  saved {outdir}/3d_bandwidth.png")
+    # figure 5: bandwidth by precision family and reach
+    plot_bandwidth_family_grid(d3, outdir, "3D", "3d_bandwidth.png")
 
     # figure 6: 3D speedup
     fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
@@ -160,9 +629,9 @@ def plot_3d(df, outdir):
             common = cpu.index.intersection(sub.index)
             if len(common) == 0:
                 continue
+            common = common.sort_values()
             speedup = cpu.loc[common] / sub.loc[common]
-            ax.plot(common, speedup, "s-", color=COLORS.get(v, "gray"),
-                    label=LABELS.get(v, v), markersize=5)
+            plot_variant(ax, common, speedup, v)
         ax.axhline(y=1, color="gray", linestyle=":", alpha=0.5)
         style_ax(ax, "N", "speedup vs CPU" if R == reaches[0] else "", f"3D reach={R}")
     fig.suptitle("3D GPU speedup over CPU", fontsize=13, fontweight="bold", y=1.02)
@@ -170,70 +639,121 @@ def plot_3d(df, outdir):
     fig.savefig(f"{outdir}/3d_speedup.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/3d_speedup.png")
 
+    # figure 7: accuracy-performance tradeoff at fixed N
+    plot_accuracy_bandwidth_tradeoff(d3, outdir, "3D", "3d_accuracy_bandwidth_tradeoff.png")
+
+    # figure 8: normalized Kahan benefit
+    plot_kahan_benefit(
+        d3,
+        outdir,
+        "3D",
+        "max_abs_error",
+        "error improvement (error_naive / error_variant)",
+        "3d_kahan_error_improvement.png",
+        invert=True,
+    )
+    plot_kahan_benefit(
+        d3,
+        outdir,
+        "3D",
+        "bandwidth_gbs",
+        "bandwidth ratio (bandwidth_variant / bandwidth_naive)",
+        "3d_kahan_bandwidth_ratio.png",
+        invert=False,
+    )
+    plot_error_vs_fp32(d3, outdir, "3D", "3d_error_fp32_over_variant.png")
+
 
 def plot_combined_summary(df, outdir):
     """single summary figure: 2x2 grid with the most important comparisons"""
+    if df.empty:
+        print("  skipped summary: no rows found")
+        return
+
     fig, axes = plt.subplots(2, 2, figsize=(13, 10))
 
     # top-left: 2D bandwidth for all reaches, fp32
     ax = axes[0, 0]
     d2 = df[df["dim"] == 2]
-    for R in sorted(d2["reach"].unique()):
-        sub = d2[(d2["variant"] == "cuda_fp32") & (d2["reach"] == R)]
-        ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "o-", label=f"R={R}", markersize=5)
-    ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW}")
-    style_ax(ax, "N", "bandwidth (GB/s)", "2D fp32 bandwidth by reach")
+    if not d2.empty:
+        for R in sorted(d2["reach"].unique()):
+            sub = d2[(d2["variant"] == "cuda_fp32") & (d2["reach"] == R)]
+            if not sub.empty:
+                ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "o-", label=f"R={R}", markersize=5)
+        ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW}")
+        style_ax(ax, "N", "bandwidth (GB/s)", "2D fp32 bandwidth by reach")
+    else:
+        ax.set_title("2D fp32 bandwidth by reach")
+        ax.text(0.5, 0.5, "No 2D data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
 
     # top-right: 3D bandwidth for all reaches, fp32
     ax = axes[0, 1]
     d3 = df[df["dim"] == 3]
-    for R in sorted(d3["reach"].unique()):
-        sub = d3[(d3["variant"] == "cuda_fp32_3d") & (d3["reach"] == R)]
-        ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "s-", label=f"R={R}", markersize=5)
-    ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW}")
-    style_ax(ax, "N", "bandwidth (GB/s)", "3D fp32 bandwidth by reach")
+    if not d3.empty:
+        for R in sorted(d3["reach"].unique()):
+            sub = d3[(d3["variant"] == "cuda_fp32_3d") & (d3["reach"] == R)]
+            if not sub.empty:
+                ax.plot(sub["grid_size"], sub["bandwidth_gbs"], "s-", label=f"R={R}", markersize=5)
+        ax.axhline(y=PEAK_BW, color="red", linestyle="--", alpha=0.4, label=f"peak {PEAK_BW}")
+        style_ax(ax, "N", "bandwidth (GB/s)", "3D fp32 bandwidth by reach")
+    else:
+        ax.set_title("3D fp32 bandwidth by reach")
+        ax.text(0.5, 0.5, "No 3D data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
 
     # bottom-left: Kahan vs naive vs kahan_reg accuracy (2D, largest grid per reach)
     ax = axes[1, 0]
-    reaches = sorted(d2["reach"].unique())
-    x = np.arange(len(reaches))
-    width = 0.25
-    naive_err = []
-    kahan_err = []
-    kahan_reg_err = []
-    for R in reaches:
-        sub_n = d2[(d2["variant"] == "cuda_fp16_naive") & (d2["reach"] == R)]
-        sub_k = d2[(d2["variant"] == "cuda_fp16_kahan") & (d2["reach"] == R)]
-        sub_kr = d2[(d2["variant"] == "cuda_fp16_kahan_reg") & (d2["reach"] == R)]
-        naive_err.append(sub_n["max_abs_error"].iloc[-1] if len(sub_n) > 0 else 0)
-        kahan_err.append(sub_k["max_abs_error"].iloc[-1] if len(sub_k) > 0 else 0)
-        kahan_reg_err.append(sub_kr["max_abs_error"].iloc[-1] if len(sub_kr) > 0 else 0)
-    ax.bar(x - width, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
-    ax.bar(x, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
-    ax.bar(x + width, kahan_reg_err, width, label="fp16+Kahan (reg)", color=COLORS["cuda_fp16_kahan_reg"])
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"R={R}" for R in reaches])
-    style_ax(ax, "stencil reach", "max |error| (largest N)", "2D Kahan vs naive accuracy")
+    if not d2.empty:
+        reaches = sorted(d2["reach"].unique())
+        x = np.arange(len(reaches))
+        width = 0.25
+        naive_err = []
+        kahan_err = []
+        kahan_reg_err = []
+        for R in reaches:
+            sub_n = d2[(d2["variant"] == "cuda_fp16_naive") & (d2["reach"] == R)]
+            sub_k = d2[(d2["variant"] == "cuda_fp16_kahan") & (d2["reach"] == R)]
+            sub_kr = d2[(d2["variant"] == "cuda_fp16_kahan_reg") & (d2["reach"] == R)]
+            naive_err.append(sub_n["max_abs_error"].iloc[-1] if len(sub_n) > 0 else 0)
+            kahan_err.append(sub_k["max_abs_error"].iloc[-1] if len(sub_k) > 0 else 0)
+            kahan_reg_err.append(sub_kr["max_abs_error"].iloc[-1] if len(sub_kr) > 0 else 0)
+        ax.bar(x - width, naive_err, width, label="fp16 naive", color=COLORS["cuda_fp16_naive"])
+        ax.bar(x, kahan_err, width, label="fp16+Kahan", color=COLORS["cuda_fp16_kahan"])
+        ax.bar(x + width, kahan_reg_err, width, label="fp16+Kahan (reg)", color=COLORS["cuda_fp16_kahan_reg"])
+        ax.set_yscale("log")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"R={R}" for R in reaches])
+        style_ax(ax, "stencil reach", "max |error| (largest N)", "2D Kahan vs naive accuracy")
+    else:
+        ax.set_title("2D Kahan vs naive accuracy")
+        ax.text(0.5, 0.5, "No 2D data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
 
     # bottom-right: GPU speedup over CPU, 3D N=128 across reaches
     ax = axes[1, 1]
-    variants_3d = ["cuda_fp32_3d", "cuda_fp16_naive_3d", "cuda_fp16_kahan_3d"]
-    x = np.arange(len(reaches))
-    width = 0.25
-    for i, v in enumerate(variants_3d):
-        speedups = []
-        for R in reaches:
-            cpu_t = d3[(d3["variant"] == "cpu_fp64_3d") & (d3["reach"] == R) & (d3["grid_size"] == 128)]
-            gpu_t = d3[(d3["variant"] == v) & (d3["reach"] == R) & (d3["grid_size"] == 128)]
-            if len(cpu_t) > 0 and len(gpu_t) > 0:
-                speedups.append(cpu_t["elapsed_ms"].iloc[0] / gpu_t["elapsed_ms"].iloc[0])
-            else:
-                speedups.append(0)
-        ax.bar(x + (i - 1) * width, speedups, width, label=LABELS.get(v, v), color=COLORS.get(v, "gray"))
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"R={R}" for R in reaches])
-    style_ax(ax, "stencil reach", "speedup vs CPU", "3D GPU speedup (N=128)")
+    if not d3.empty:
+        reaches = sorted(d3["reach"].unique())
+        variants_3d = ["cuda_fp32_3d", "cuda_fp16_naive_3d", "cuda_fp16_kahan_3d"]
+        x = np.arange(len(reaches))
+        width = 0.25
+        for i, v in enumerate(variants_3d):
+            speedups = []
+            for R in reaches:
+                cpu_t = d3[(d3["variant"] == "cpu_fp64_3d") & (d3["reach"] == R) & (d3["grid_size"] == 128)]
+                gpu_t = d3[(d3["variant"] == v) & (d3["reach"] == R) & (d3["grid_size"] == 128)]
+                if len(cpu_t) > 0 and len(gpu_t) > 0:
+                    speedups.append(cpu_t["elapsed_ms"].iloc[0] / gpu_t["elapsed_ms"].iloc[0])
+                else:
+                    speedups.append(0)
+            ax.bar(x + (i - 1) * width, speedups, width, label=LABELS.get(v, v), color=COLORS.get(v, "gray"))
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"R={R}" for R in reaches])
+        style_ax(ax, "stencil reach", "speedup vs CPU", "3D GPU speedup (N=128)")
+    else:
+        ax.set_title("3D GPU speedup (N=128)")
+        ax.text(0.5, 0.5, "No 3D data", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
 
     fig.suptitle("Heat stencil benchmark summary (GTX 1650 Max-Q)", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -246,6 +766,7 @@ def main():
     outdir = sys.argv[2] if len(sys.argv) > 2 else "results"
 
     df = pd.read_csv(csv_path)
+    df = prepare_plot_df(df)
     print(f"loaded {len(df)} rows from {csv_path}")
     print(f"dims: {sorted(df['dim'].unique())}, reaches: {sorted(df['reach'].unique())}")
 
