@@ -177,9 +177,11 @@ def plot_3d(df, outdir):
         axes = [axes]
     for ax, R in zip(axes, reaches):
         cpu_v = "cpu_fp64_3d"
-        cpu = d3[(d3["variant"] == cpu_v) & (d3["reach"] == R)].set_index("grid_size")["elapsed_ms"]
+        cpu_df = d3[(d3["variant"] == cpu_v) & (d3["reach"] == R)].drop_duplicates(subset="grid_size")
+        cpu = cpu_df.set_index("grid_size")["elapsed_ms"]
         for v in gpu_variants:
-            sub = d3[(d3["variant"] == v) & (d3["reach"] == R)].set_index("grid_size")["elapsed_ms"]
+            sub_df = d3[(d3["variant"] == v) & (d3["reach"] == R)].drop_duplicates(subset="grid_size")
+            sub = sub_df.set_index("grid_size")["elapsed_ms"]
             common = cpu.index.intersection(sub.index)
             if len(common) == 0:
                 continue
@@ -193,6 +195,7 @@ def plot_3d(df, outdir):
     fig.tight_layout()
     fig.savefig(f"{outdir}/3d_speedup.png", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/3d_speedup.png")
+
 
 
 def plot_combined_summary(df, outdir):
@@ -271,12 +274,23 @@ def main():
 
     plt.style.use("seaborn-v0_8-whitegrid")
 
-    print("generating 2D plots...")
-    plot_2d(df, outdir)
-    print("generating 3D plots...")
-    plot_3d(df, outdir)
+    if 2 in df["dim"].values:
+        print("generating 2D plots...")
+        plot_2d(df, outdir)
+    else:
+        print("skipping 2D plots (no 2D data)")
+
+    if 3 in df["dim"].values:
+        print("generating 3D plots...")
+        plot_3d(df, outdir)
+    else:
+        print("skipping 3D plots (no 3D data)")
+
     print("generating summary...")
-    plot_combined_summary(df, outdir)
+    try:
+        plot_combined_summary(df, outdir)
+    except Exception as e:
+        print(f"  skipping summary (not enough data): {e}")
     print("done")
 
 

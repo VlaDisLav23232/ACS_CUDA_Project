@@ -1,9 +1,14 @@
 /*
- * 3D heat stencil — fp16 (naive + Kahan) with 2.5D shared memory tiling
+ * 3D heat stencil — fp16 (naive + Kahan) with Z-sliding-window 2.5D tiling
  *
- * Tiles only the XY plane in shared memory; Z neighbors read from global
- * memory (served efficiently by L2 cache).  This avoids the cubic halo
- * blowup and keeps tiles large even for R=8.
+ * Same sliding-window + Z-chunking strategy as the fp32 kernel:
+ *   - XY tile (core + R-halo) loaded cooperatively into shared memory
+ *   - Z neighbors held in a per-thread register circular buffer
+ *   - Each block slides through a CHUNK of Z-layers (blockIdx.z selects chunk)
+ *   - Only 1 new global read per thread per Z iteration (amortised)
+ *
+ * For fp16 naive:  smem stores __half, z_buf stores float (promoted from __half)
+ * For fp16 Kahan:  smem stores __half + float (compensation), z_buf stores float
  */
 
 #include "stencil.h"
@@ -22,19 +27,26 @@
 __constant__ float d_coeffs_smem3d16[MAX_REACH + 1];
 __constant__ int   d_reach_smem3d16;
 
-/* ---- GPU auto-detection: 2D tile for 2.5D tiling ---- */
+/* ---- GPU auto-detection: 2D tile for sliding-window tiling ---- */
 
 struct TileConfig25D16 {
     int tile_x, tile_y;
+    int z_chunk;
     size_t smem_bytes;
 };
 
-static TileConfig25D16 query_tile_25d16(int R, size_t elem_bytes) {
+static TileConfig25D16 query_tile_sliding16(int R, int N, size_t elem_bytes) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
 
     size_t smem_avail = prop.sharedMemPerBlock;
     int max_threads   = prop.maxThreadsPerBlock;
+    int max_regs      = prop.regsPerBlock;
+    int sm_count      = prop.multiProcessorCount;
+
+    /* Register estimate: (2R+1) for z_buf + ~32 base.
+       For Kahan we also keep compensation in registers — add (2R+1). */
+    int regs_per_thread = 2 * (2 * R + 1) + 32;  /* conservative for Kahan */
 
     static const int cands[][2] = {
         {32,32},{32,16},{16,32},{32,8},{16,16},{16,8},{8,16},{8,8},{4,4}
@@ -43,148 +55,236 @@ static TileConfig25D16 query_tile_25d16(int R, size_t elem_bytes) {
 
     for (int i = 0; i < n; i++) {
         int tx = cands[i][0], ty = cands[i][1];
-        if (tx * ty > max_threads) continue;
+        int nthreads = tx * ty;
+        if (nthreads > max_threads) continue;
+
         size_t smem = (size_t)(tx + 2*R) * (ty + 2*R) * elem_bytes;
-        if (smem <= smem_avail) {
-            printf("  3D fp16 2.5D tile: %dx%d (XY), smem: %zu bytes (%.1fKB)\n",
-                   tx, ty, smem, smem / 1024.0);
-            return {tx, ty, smem};
-        }
+        if (smem > smem_avail) continue;
+
+        if (nthreads * regs_per_thread > max_regs) continue;
+
+        /* Compute Z-chunk for GPU occupancy */
+        int xy_blocks = ((N + tx - 1) / tx) * ((N + ty - 1) / ty);
+        int interior_z = N - 2 * R;
+        if (interior_z <= 0) continue;
+
+        int target_blocks = sm_count * 4;
+        int z_chunks = max(1, (target_blocks + xy_blocks - 1) / xy_blocks);
+        z_chunks = min(z_chunks, interior_z);
+        int z_chunk = (interior_z + z_chunks - 1) / z_chunks;
+
+        printf("  3D fp16 sliding tile: %dx%d (XY), z_chunk: %d, smem: %zu bytes (%.1fKB)\n",
+               tx, ty, z_chunk, smem, smem / 1024.0);
+        return {tx, ty, z_chunk, smem};
     }
     size_t fb = (size_t)(4+2*R)*(4+2*R)*elem_bytes;
     printf("  warning: fallback 4x4 tile\n");
-    return {4, 4, fb};
+    return {4, 4, 1, fb};
 }
 
-/* ---- fp16 naive 2.5D kernel ---- */
+/* ---- fp16 naive Z-sliding kernel with Z-chunking ---- */
 
-__global__ void heat3d_fp16_naive_smem25d_kernel(const __half* __restrict__ u,
+__global__ void heat3d_fp16_naive_sliding_kernel(const __half* __restrict__ u,
                                                   __half* __restrict__ u_next,
                                                   int N, float r,
-                                                  int tile_x, int tile_y) {
-    int R = d_reach_smem3d16;
-    int sw = tile_x + 2 * R;
-    int sh = tile_y + 2 * R;
+                                                  int tile_x, int tile_y,
+                                                  int z_chunk) {
+    const int R = d_reach_smem3d16;
+    const int DIAM = 2 * R + 1;
+    const int sw = tile_x + 2 * R;
+    const int sh = tile_y + 2 * R;
 
     extern __shared__ __half smem_h[];
 
-    int gx = blockIdx.x * tile_x + threadIdx.x;
-    int gy = blockIdx.y * tile_y + threadIdx.y;
-    int gz = blockIdx.z + R;
+    const int gx = blockIdx.x * tile_x + threadIdx.x;
+    const int gy = blockIdx.y * tile_y + threadIdx.y;
 
-    int bx = blockIdx.x * tile_x - R;
-    int by = blockIdx.y * tile_y - R;
+    const int bx = blockIdx.x * tile_x - R;
+    const int by = blockIdx.y * tile_y - R;
 
-    int tid      = threadIdx.y * blockDim.x + threadIdx.x;
-    int block_sz = blockDim.x * blockDim.y;
-    int total    = sw * sh;
+    /* Z-range for this block's chunk */
+    const int gz_first = R + blockIdx.z * z_chunk;
+    const int gz_last  = min(N - R - 1, gz_first + z_chunk - 1);
+    if (gz_first > gz_last) return;
 
-    for (int idx = tid; idx < total; idx += block_sz) {
-        int sy = idx / sw;
-        int sx = idx % sw;
-        int ci = max(0, min(N-1, bx + sx));
-        int cj = max(0, min(N-1, by + sy));
-        smem_h[idx] = u[(size_t)gz * N * N + cj * N + ci];
-    }
-    __syncthreads();
+    const int tid      = threadIdx.y * blockDim.x + threadIdx.x;
+    const int block_sz = blockDim.x * blockDim.y;
+    const int total_xy = sw * sh;
 
-    if (gx >= R && gx < N-R && gy >= R && gy < N-R) {
-        int si = threadIdx.x + R;
-        int sj = threadIdx.y + R;
+    const bool active = (gx >= R && gx < N - R && gy >= R && gy < N - R);
 
-        float center = __half2float(smem_h[sj * sw + si]);
-        float lap = 3.0f * d_coeffs_smem3d16[0] * center;
+    /* ---- Phase 1: Prefill Z sliding buffer ---- */
+    float z_buf[2 * MAX_REACH + 1];
 
-        for (int m = 1; m <= R; m++) {
-            /* XY from shared memory */
-            float xy = __half2float(smem_h[sj * sw + (si-m)])
-                     + __half2float(smem_h[sj * sw + (si+m)])
-                     + __half2float(smem_h[(sj-m) * sw + si])
-                     + __half2float(smem_h[(sj+m) * sw + si]);
-            /* Z from global memory */
-            float zn = __half2float(u[(size_t)(gz-m) * N*N + gy*N + gx])
-                     + __half2float(u[(size_t)(gz+m) * N*N + gy*N + gx]);
-            lap += d_coeffs_smem3d16[m] * (xy + zn);
+    {
+        int cx = (gx < N) ? gx : N - 1;
+        int cy = (gy < N) ? gy : N - 1;
+        for (int m = 0; m < DIAM; m++) {
+            int gz = gz_first - R + m;
+            gz = max(0, min(N - 1, gz));
+            z_buf[m] = __half2float(u[(size_t)gz * N * N + (size_t)cy * N + cx]);
         }
-        u_next[(size_t)gz * N * N + gy * N + gx] = __float2half(center + r * lap);
+    }
+
+    /* ---- Phase 2: Slide through this block's Z chunk ---- */
+    for (int gz = gz_first; gz <= gz_last; gz++) {
+        /* Load XY tile at this Z into shared memory */
+        for (int idx = tid; idx < total_xy; idx += block_sz) {
+            int sy = idx / sw;
+            int sx = idx % sw;
+            int ci = max(0, min(N-1, bx + sx));
+            int cj = max(0, min(N-1, by + sy));
+            smem_h[idx] = u[(size_t)gz * N * N + (size_t)cj * N + ci];
+        }
+        __syncthreads();
+
+        if (active) {
+            int si = threadIdx.x + R;
+            int sj = threadIdx.y + R;
+
+            float center = z_buf[R];
+            float lap = 3.0f * d_coeffs_smem3d16[0] * center;
+
+            for (int m = 1; m <= R; m++) {
+                float xy = __half2float(smem_h[sj * sw + (si-m)])
+                         + __half2float(smem_h[sj * sw + (si+m)])
+                         + __half2float(smem_h[(sj-m) * sw + si])
+                         + __half2float(smem_h[(sj+m) * sw + si]);
+                float zn = z_buf[R - m] + z_buf[R + m];
+                lap += d_coeffs_smem3d16[m] * (xy + zn);
+            }
+            u_next[(size_t)gz * N * N + (size_t)gy * N + gx] = __float2half(center + r * lap);
+        }
+
+        __syncthreads();
+
+        /* Slide the Z buffer */
+        for (int m = 0; m < DIAM - 1; m++) {
+            z_buf[m] = z_buf[m + 1];
+        }
+        {
+            int next_z = max(0, min(N - 1, gz + R + 1));
+            int cx = (gx < N) ? gx : N - 1;
+            int cy = (gy < N) ? gy : N - 1;
+            z_buf[DIAM - 1] = __half2float(u[(size_t)next_z * N * N + (size_t)cy * N + cx]);
+        }
     }
 }
 
-/* ---- fp16 Kahan 2.5D kernel ---- */
+/* ---- fp16 Kahan Z-sliding kernel with Z-chunking ----
+ *
+ * Kahan compensation requires maintaining both __half u and float c arrays.
+ * The Z sliding buffer holds reconstructed values (half + compensation).
+ * Shared memory holds the XY tile for both u (half) and c (float).
+ */
 
-__global__ void heat3d_fp16_kahan_smem25d_kernel(const __half* __restrict__ u,
+__global__ void heat3d_fp16_kahan_sliding_kernel(const __half* __restrict__ u,
                                                   __half* __restrict__ u_next,
                                                   float* __restrict__ c,
                                                   float* __restrict__ c_next,
                                                   int N, float r,
-                                                  int tile_x, int tile_y) {
-    int R = d_reach_smem3d16;
-    int sw = tile_x + 2 * R;
-    int sh = tile_y + 2 * R;
-    int n_elem = sw * sh;
+                                                  int tile_x, int tile_y,
+                                                  int z_chunk) {
+    const int R = d_reach_smem3d16;
+    const int DIAM = 2 * R + 1;
+    const int sw = tile_x + 2 * R;
+    const int sh = tile_y + 2 * R;
+    const int n_elem = sw * sh;
 
+    /* Shared memory layout: __half[n_elem] (aligned) + float[n_elem] */
     extern __shared__ char smem_raw[];
     __half* s_u = (__half*)smem_raw;
     size_t half_bytes = (size_t)n_elem * sizeof(__half);
     size_t aligned    = (half_bytes + 3) & ~(size_t)3;
     float* s_c = (float*)(smem_raw + aligned);
 
-    int gx = blockIdx.x * tile_x + threadIdx.x;
-    int gy = blockIdx.y * tile_y + threadIdx.y;
-    int gz = blockIdx.z + R;
+    const int gx = blockIdx.x * tile_x + threadIdx.x;
+    const int gy = blockIdx.y * tile_y + threadIdx.y;
 
-    int bx = blockIdx.x * tile_x - R;
-    int by = blockIdx.y * tile_y - R;
+    const int bx = blockIdx.x * tile_x - R;
+    const int by = blockIdx.y * tile_y - R;
 
-    int tid      = threadIdx.y * blockDim.x + threadIdx.x;
-    int block_sz = blockDim.x * blockDim.y;
+    /* Z-range for this block's chunk */
+    const int gz_first = R + blockIdx.z * z_chunk;
+    const int gz_last  = min(N - R - 1, gz_first + z_chunk - 1);
+    if (gz_first > gz_last) return;
 
-    /* cooperatively load 2D XY tiles for both u and c at this Z level */
-    for (int idx = tid; idx < n_elem; idx += block_sz) {
-        int sy = idx / sw;
-        int sx = idx % sw;
-        int ci = max(0, min(N-1, bx + sx));
-        int cj = max(0, min(N-1, by + sy));
-        size_t gidx = (size_t)gz * N * N + cj * N + ci;
-        s_u[idx] = u[gidx];
-        s_c[idx] = c[gidx];
+    const int tid      = threadIdx.y * blockDim.x + threadIdx.x;
+    const int block_sz = blockDim.x * blockDim.y;
+
+    const bool active = (gx >= R && gx < N - R && gy >= R && gy < N - R);
+
+    /* ---- Phase 1: Prefill Z sliding buffer with reconstructed values ---- */
+    float z_buf[2 * MAX_REACH + 1];
+
+    {
+        int cx = (gx < N) ? gx : N - 1;
+        int cy = (gy < N) ? gy : N - 1;
+        for (int m = 0; m < DIAM; m++) {
+            int gz = gz_first - R + m;
+            gz = max(0, min(N - 1, gz));
+            size_t gidx = (size_t)gz * N * N + (size_t)cy * N + cx;
+            z_buf[m] = __half2float(u[gidx]) + c[gidx];
+        }
     }
-    __syncthreads();
 
-    if (gx >= R && gx < N-R && gy >= R && gy < N-R) {
-        int si = threadIdx.x + R;
-        int sj = threadIdx.y + R;
-        int sidx = sj * sw + si;
+    /* ---- Phase 2: Slide through this block's Z chunk ---- */
+    for (int gz = gz_first; gz <= gz_last; gz++) {
+        /* Load XY tile (u and c) at this Z into shared memory */
+        for (int idx = tid; idx < n_elem; idx += block_sz) {
+            int sy = idx / sw;
+            int sx = idx % sw;
+            int ci = max(0, min(N-1, bx + sx));
+            int cj = max(0, min(N-1, by + sy));
+            size_t gidx = (size_t)gz * N * N + (size_t)cj * N + ci;
+            s_u[idx] = u[gidx];
+            s_c[idx] = c[gidx];
+        }
+        __syncthreads();
 
-        float center = __half2float(s_u[sidx]) + s_c[sidx];
-        float lap = 3.0f * d_coeffs_smem3d16[0] * center;
+        if (active) {
+            int si = threadIdx.x + R;
+            int sj = threadIdx.y + R;
 
-        for (int m = 1; m <= R; m++) {
-            /* XY neighbors from shared memory */
-            int s_xm = sj * sw + (si - m);
-            int s_xp = sj * sw + (si + m);
-            int s_ym = (sj - m) * sw + si;
-            int s_yp = (sj + m) * sw + si;
-            float xm = __half2float(s_u[s_xm]) + s_c[s_xm];
-            float xp = __half2float(s_u[s_xp]) + s_c[s_xp];
-            float ym = __half2float(s_u[s_ym]) + s_c[s_ym];
-            float yp = __half2float(s_u[s_yp]) + s_c[s_yp];
+            float center = z_buf[R];
+            float lap = 3.0f * d_coeffs_smem3d16[0] * center;
 
-            /* Z neighbors from global memory */
-            size_t gidx_zm = (size_t)(gz-m) * N*N + gy*N + gx;
-            size_t gidx_zp = (size_t)(gz+m) * N*N + gy*N + gx;
-            float zm = __half2float(u[gidx_zm]) + c[gidx_zm];
-            float zp = __half2float(u[gidx_zp]) + c[gidx_zp];
+            for (int m = 1; m <= R; m++) {
+                int s_xm = sj * sw + (si - m);
+                int s_xp = sj * sw + (si + m);
+                int s_ym = (sj - m) * sw + si;
+                int s_yp = (sj + m) * sw + si;
+                float xm = __half2float(s_u[s_xm]) + s_c[s_xm];
+                float xp = __half2float(s_u[s_xp]) + s_c[s_xp];
+                float ym = __half2float(s_u[s_ym]) + s_c[s_ym];
+                float yp = __half2float(s_u[s_yp]) + s_c[s_yp];
 
-            lap += d_coeffs_smem3d16[m] * (xm + xp + ym + yp + zm + zp);
+                float zn = z_buf[R - m] + z_buf[R + m];
+
+                lap += d_coeffs_smem3d16[m] * (xm + xp + ym + yp + zn);
+            }
+
+            float exact_result = center + r * lap;
+            __half stored = __float2half(exact_result);
+            size_t gidx = (size_t)gz * N * N + (size_t)gy * N + gx;
+            u_next[gidx] = stored;
+            volatile float stored_back = __half2float(stored);
+            c_next[gidx] = exact_result - stored_back;
         }
 
-        float exact_result = center + r * lap;
-        __half stored = __float2half(exact_result);
-        size_t gidx = (size_t)gz * N * N + gy * N + gx;
-        u_next[gidx] = stored;
-        volatile float stored_back = __half2float(stored);
-        c_next[gidx] = exact_result - stored_back;
+        __syncthreads();
+
+        /* Slide the Z buffer */
+        for (int m = 0; m < DIAM - 1; m++) {
+            z_buf[m] = z_buf[m + 1];
+        }
+        {
+            int next_z = max(0, min(N - 1, gz + R + 1));
+            int cx = (gx < N) ? gx : N - 1;
+            int cy = (gy < N) ? gy : N - 1;
+            size_t gidx = (size_t)next_z * N * N + (size_t)cy * N + cx;
+            z_buf[DIAM - 1] = __half2float(u[gidx]) + c[gidx];
+        }
     }
 }
 
@@ -235,8 +335,8 @@ StencilResult run_cuda_fp16_naive_smem_3d(const StencilConfig& cfg) {
     size_t total_pts  = (size_t)N * N * N;
     size_t half_bytes = total_pts * sizeof(__half);
 
-    printf("  [smem 2.5D] auto-detecting optimal tile...\n");
-    TileConfig25D16 tile = query_tile_25d16(R, sizeof(__half));
+    printf("  [smem sliding] auto-detecting optimal tile...\n");
+    TileConfig25D16 tile = query_tile_sliding16(R, N, sizeof(__half));
 
     CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_smem3d16, cfg.fd_coeffs, (R+1)*sizeof(float)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_reach_smem3d16, &R, sizeof(int)));
@@ -262,11 +362,13 @@ StencilResult run_cuda_fp16_naive_smem_3d(const StencilConfig& cfg) {
         fprintf(stderr, "error: grid too small for reach %d in 3D\n", R);
         exit(1);
     }
+    int z_chunks = (interior_z + tile.z_chunk - 1) / tile.z_chunk;
 
     dim3 block(tile.tile_x, tile.tile_y);
     dim3 grid3((N + tile.tile_x - 1) / tile.tile_x,
                (N + tile.tile_y - 1) / tile.tile_y,
-               interior_z);
+               z_chunks);
+
     dim3 bc_block(16, 16);
     dim3 bc_grid((N + 15) / 16, (N + 15) / 16);
 
@@ -276,8 +378,8 @@ StencilResult run_cuda_fp16_naive_smem_3d(const StencilConfig& cfg) {
     CUDA_CHECK(cudaEventRecord(start));
 
     for (int t = 0; t < cfg.timesteps; t++) {
-        heat3d_fp16_naive_smem25d_kernel<<<grid3, block, tile.smem_bytes>>>(
-            d_u, d_u_next, N, r, tile.tile_x, tile.tile_y);
+        heat3d_fp16_naive_sliding_kernel<<<grid3, block, tile.smem_bytes>>>(
+            d_u, d_u_next, N, r, tile.tile_x, tile.tile_y, tile.z_chunk);
         CUDA_CHECK(cudaGetLastError());
         apply_neumann_bc_smem3d_fp16<<<bc_grid, bc_block>>>(d_u_next, N, R);
         __half* tmp = d_u; d_u = d_u_next; d_u_next = tmp;
@@ -325,10 +427,10 @@ StencilResult run_cuda_fp16_kahan_smem_3d(const StencilConfig& cfg) {
     size_t half_bytes  = total_pts * sizeof(__half);
     size_t float_bytes = total_pts * sizeof(float);
 
-    printf("  [smem 2.5D] auto-detecting optimal Kahan tile...\n");
+    printf("  [smem sliding] auto-detecting optimal Kahan tile...\n");
     /* Kahan needs __half + float per element = 6 bytes */
     size_t smem_per_elem = sizeof(__half) + sizeof(float);
-    TileConfig25D16 tile = query_tile_25d16(R, smem_per_elem);
+    TileConfig25D16 tile = query_tile_sliding16(R, N, smem_per_elem);
 
     CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_smem3d16, cfg.fd_coeffs, (R+1)*sizeof(float)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_reach_smem3d16, &R, sizeof(int)));
@@ -360,11 +462,12 @@ StencilResult run_cuda_fp16_kahan_smem_3d(const StencilConfig& cfg) {
         fprintf(stderr, "error: grid too small for reach %d in 3D\n", R);
         exit(1);
     }
+    int z_chunks = (interior_z + tile.z_chunk - 1) / tile.z_chunk;
 
     dim3 block(tile.tile_x, tile.tile_y);
     dim3 grid3((N + tile.tile_x - 1) / tile.tile_x,
                (N + tile.tile_y - 1) / tile.tile_y,
-               interior_z);
+               z_chunks);
 
     /* compute actual shared memory: __half array (aligned) + float array */
     int n_tile = (tile.tile_x + 2*R) * (tile.tile_y + 2*R);
@@ -381,9 +484,9 @@ StencilResult run_cuda_fp16_kahan_smem_3d(const StencilConfig& cfg) {
     CUDA_CHECK(cudaEventRecord(start));
 
     for (int t = 0; t < cfg.timesteps; t++) {
-        heat3d_fp16_kahan_smem25d_kernel<<<grid3, block, smem_actual>>>(
+        heat3d_fp16_kahan_sliding_kernel<<<grid3, block, smem_actual>>>(
             d_u, d_u_next, d_c, d_c_next, N, r,
-            tile.tile_x, tile.tile_y);
+            tile.tile_x, tile.tile_y, tile.z_chunk);
         CUDA_CHECK(cudaGetLastError());
         apply_neumann_bc_smem3d_fp16<<<bc_grid, bc_block>>>(d_u_next, N, R);
         apply_neumann_bc_smem3d_comp<<<bc_grid, bc_block>>>(d_c_next, N, R);
