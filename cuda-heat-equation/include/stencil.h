@@ -41,6 +41,7 @@ StencilResult run_cpu_fp64(const StencilConfig& cfg);
 StencilResult run_cuda_fp32(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_naive(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_tensor_core(const StencilConfig& cfg);
 
 StencilResult run_cpu_fp64_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp32_3d(const StencilConfig& cfg);

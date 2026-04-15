@@ -28,7 +28,7 @@ void print_usage() {
     printf("  -t <steps>      timesteps (default 5000)\n");
     printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    printf("  -v <variant>    cpu|fp32|fp16|kahan|all (default all)\n");
+    printf("  -v <variant>    cpu|fp32|fp16|kahan|tensor|all (default all)\n");
     printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     printf("  -h              show this help\n");
 }
@@ -36,7 +36,7 @@ void print_usage() {
 int main(int argc, char** argv) {
     StencilConfig cfg = default_config();
     std::string variant = "all";
-    std::string csv_path = "results/benchmarks.csv";
+    std::string csv_path = "../results/benchmarks.csv";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-n") == 0 && i+1 < argc) {
@@ -116,6 +116,17 @@ int main(int argc, char** argv) {
             compute_errors(rk, cpu_result.final_grid);
             print_summary(rk);
             write_csv_row(csv_path, rk);
+        }
+        if (variant == "all" || variant == "tensor") {
+            if (cfg.nx % 16 != 0) {
+                fprintf(stderr, "warning: tensor core variant requires N%%16==0, skipping (N=%d)\n", cfg.nx);
+            } else {
+                printf("\n--- CUDA fp16 Tensor Core (WMMA) ---\n");
+                StencilResult rtc = run_cuda_fp16_tensor_core(cfg);
+                compute_errors(rtc, cpu_result.final_grid);
+                print_summary(rtc);
+                write_csv_row(csv_path, rtc);
+            }
         }
     } else {
         printf("\n--- CPU fp64 reference (3D) ---\n");
