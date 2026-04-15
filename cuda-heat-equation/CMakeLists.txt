@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 
 # Must set CUDA architectures BEFORE project() in CMake 3.18+
-# GTX 1650 = compute capability 7.5
-set(CMAKE_CUDA_ARCHITECTURES 75)
+# RTX 2050 Laptop GPU = compute capability 8.6 (Ampere)
+set(CMAKE_CUDA_ARCHITECTURES 86)
 
 project(heat_stencil LANGUAGES CXX CUDA)
 
@@ -32,6 +32,7 @@ add_executable(heat_stencil
     src/heat3d_cuda.cu
     src/heat3d_cuda_fp16.cu
     src/heat3d_cuda_25d.cu
+    src/heat3d_cuda_async_pipeline.cu
     src/metrics.cpp
 )
 
