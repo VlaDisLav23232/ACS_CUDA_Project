@@ -19,6 +19,12 @@ static const int BLOCK_Y = 16;
 __constant__ float d_coeffs_fp16[MAX_REACH + 1];
 __constant__ int   d_reach_fp16;
 
+__device__ __forceinline__ void two_sum_pair(float a, float b, float& sum, float& err) {
+    sum = a + b;
+    float b_virtual = sum - a;
+    err = (a - (sum - b_virtual)) + (b - b_virtual);
+}
+
 __global__ void heat2d_fp16_naive_kernel(const __half* __restrict__ u,
                                           __half* __restrict__ u_next,
                                           int N, float r) {
@@ -160,6 +166,47 @@ __global__ void heat2d_fp16_neumaier_kernel(const __half* __restrict__ u,
 
         float lap = sum + comp;
         float exact_result = center + r * lap;
+        __half stored = __float2half(exact_result);
+        u_next[idx] = stored;
+        volatile float stored_back = __half2float(stored);
+        c_next[idx] = exact_result - stored_back;
+    }
+}
+
+__global__ void heat2d_fp16_twosum_kernel(const __half* __restrict__ u,
+                                          __half* __restrict__ u_next,
+                                          const float* __restrict__ c,
+                                          float* __restrict__ c_next,
+                                          int N, float r) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int R = d_reach_fp16;
+
+    if (i >= R && i < N - R && j >= R && j < N - R) {
+        int idx = j * N + i;
+        float center = __half2float(u[idx]) + c[idx];
+        float lap_hi = 2.0f * d_coeffs_fp16[0] * center;
+        float lap_lo = 0.0f;
+
+        for (int m = 1; m <= R; m++) {
+            int xm_idx = j * N + (i - m);
+            int xp_idx = j * N + (i + m);
+            int ym_idx = (j - m) * N + i;
+            int yp_idx = (j + m) * N + i;
+            float x = d_coeffs_fp16[m] * (
+                (__half2float(u[xm_idx]) + c[xm_idx]) +
+                (__half2float(u[xp_idx]) + c[xp_idx]) +
+                (__half2float(u[ym_idx]) + c[ym_idx]) +
+                (__half2float(u[yp_idx]) + c[yp_idx]));
+
+            float sum_err;
+            two_sum_pair(lap_hi, x, lap_hi, sum_err);
+            lap_lo += sum_err;
+        }
+
+        float lap_err;
+        two_sum_pair(lap_hi, lap_lo, lap_hi, lap_err);
+        float exact_result = center + r * (lap_hi + lap_err);
         __half stored = __float2half(exact_result);
         u_next[idx] = stored;
         volatile float stored_back = __half2float(stored);
@@ -428,6 +475,92 @@ StencilResult run_cuda_fp16_neumaier(const StencilConfig& cfg) {
 
     StencilResult res;
     res.variant_name = "cuda_fp16_neumaier";
+    res.grid_size = N;
+    res.dim = cfg.dim;
+    res.stencil_reach = R;
+    res.timesteps = cfg.timesteps;
+    res.elapsed_ms = elapsed_ms;
+    res.effective_bw_gbs = bw;
+    res.memory_bytes = 2 * half_bytes + float_bytes;
+    res.final_grid = result_f;
+
+    CUDA_CHECK(cudaFree(d_u));
+    CUDA_CHECK(cudaFree(d_u_next));
+    CUDA_CHECK(cudaFree(d_c));
+    CUDA_CHECK(cudaFree(d_c_next));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    return res;
+}
+
+StencilResult run_cuda_fp16_twosum(const StencilConfig& cfg) {
+    int N = cfg.nx;
+    int R = cfg.stencil_reach;
+    float r = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
+    size_t n_elems = N * N;
+    size_t half_bytes = n_elems * sizeof(__half);
+    size_t float_bytes = n_elems * sizeof(float);
+
+    CUDA_CHECK(cudaMemcpyToSymbol(d_coeffs_fp16, cfg.fd_coeffs, (R + 1) * sizeof(float)));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_reach_fp16, &R, sizeof(int)));
+
+    std::vector<float> h_f(n_elems, cfg.temp_initial);
+    int src_size = N / 8;
+    int src_start = N / 2 - src_size / 2;
+    for (int j = src_start; j < src_start + src_size; j++)
+        for (int i = src_start; i < src_start + src_size; i++)
+            h_f[j * N + i] = cfg.temp_source;
+
+    auto h_data = float_to_half(h_f);
+    std::vector<float> h_comp(n_elems, 0.0f);
+
+    __half *d_u, *d_u_next;
+    float *d_c, *d_c_next;
+    CUDA_CHECK(cudaMalloc(&d_u, half_bytes));
+    CUDA_CHECK(cudaMalloc(&d_u_next, half_bytes));
+    CUDA_CHECK(cudaMalloc(&d_c, float_bytes));
+    CUDA_CHECK(cudaMalloc(&d_c_next, float_bytes));
+    CUDA_CHECK(cudaMemcpy(d_u, h_data.data(), half_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_u_next, h_data.data(), half_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_c, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_c_next, h_comp.data(), float_bytes, cudaMemcpyHostToDevice));
+
+    dim3 block(BLOCK_X, BLOCK_Y);
+    dim3 grid((N + BLOCK_X - 1) / BLOCK_X, (N + BLOCK_Y - 1) / BLOCK_Y);
+    int bc_threads = 256;
+    int bc_blocks = (N + bc_threads - 1) / bc_threads;
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+
+    for (int t = 0; t < cfg.timesteps; t++) {
+        heat2d_fp16_twosum_kernel<<<grid, block>>>(d_u, d_u_next, d_c, d_c_next, N, r);
+        apply_neumann_bc_fp16<<<bc_blocks, bc_threads>>>(d_u_next, N, R);
+        apply_neumann_bc_comp<<<bc_blocks, bc_threads>>>(d_c_next, N, R);
+        __half* tmp_h = d_u; d_u = d_u_next; d_u_next = tmp_h;
+        float* tmp_c = d_c; d_c = d_c_next; d_c_next = tmp_c;
+    }
+
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float elapsed_ms = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+
+    CUDA_CHECK(cudaMemcpy(h_data.data(), d_u, half_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_comp.data(), d_c, float_bytes, cudaMemcpyDeviceToHost));
+
+    std::vector<float> result_f(n_elems);
+    for (size_t i = 0; i < n_elems; i++)
+        result_f[i] = __half2float(h_data[i]) + h_comp[i];
+
+    double bytes_per_step = 2.0 * (double)N * N * sizeof(__half) + 2.0 * (double)N * N * sizeof(float);
+    double total_bytes = bytes_per_step * cfg.timesteps;
+    double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+
+    StencilResult res;
+    res.variant_name = "cuda_fp16_twosum";
     res.grid_size = N;
     res.dim = cfg.dim;
     res.stencil_reach = R;

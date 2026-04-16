@@ -145,6 +145,16 @@ PLOT_EXCLUDED_VARIANTS = {
     "cuda_cfp16_kahan_reg",
 }
 
+ACCURACY_FILTERED_VARIANTS_2D = {
+    "cuda_fp32",
+    "cuda_fp16_naive",
+    "cuda_cfp16_naive",
+    "cuda_fp16_kahan",
+    "cuda_fp16_neumaier",
+    "cuda_fp16_twosum",
+    "cuda_cfp16_kahan",
+}
+
 TRADEOFF_INCLUDED_VARIANTS = {
     "cuda_fp32",
     "cuda_cfp16_kahan_tiled",
@@ -155,6 +165,7 @@ TRADEOFF_INCLUDED_VARIANTS = {
 BANDWIDTH_FAMILIES = [
     ("fp32", ["cuda_fp32", "cuda_fp32_3d"]),
     ("fp16", ["cuda_fp16_naive", "cuda_fp16_kahan", "cuda_fp16_kahan_tiled",
+              "cuda_fp16_neumaier", "cuda_fp16_twosum",
               "cuda_fp16_naive_3d", "cuda_fp16_kahan_3d"]),
     ("cfp16", ["cuda_cfp16_naive", "cuda_cfp16_kahan", "cuda_cfp16_kahan_tiled"]),
 ]
@@ -202,6 +213,41 @@ def plot_variant(ax, x, y, variant, label=None, color=None, marker=None, linesty
         markerfacecolor="white",
         markeredgewidth=1.2,
     )
+
+
+def plot_accuracy_grid(df_dim, outdir, dim_label, filename, variants=None, title_suffix=""):
+    reaches = sorted(df_dim["reach"].unique())
+    fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
+    if len(reaches) == 1:
+        axes = [axes]
+
+    allowed_variants = None if variants is None else set(variants)
+    plot_variants = sorted(df_dim["variant"].unique(), key=variant_sort_key)
+
+    for ax, reach in zip(axes, reaches):
+        for variant in plot_variants:
+            if "cpu" in variant:
+                continue
+            if allowed_variants is not None and variant not in allowed_variants:
+                continue
+            sub = df_dim[(df_dim["variant"] == variant) & (df_dim["reach"] == reach)]
+            if sub.empty or sub["max_abs_error"].max() == 0:
+                continue
+            sub = sub.sort_values("grid_size")
+            plot_variant(ax, sub["grid_size"], sub["max_abs_error"], variant)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        style_ax(ax, "N", "max |error|" if reach == reaches[0] else "", f"{dim_label} reach={reach}")
+
+    title = f"{dim_label} accuracy vs grid size"
+    if title_suffix:
+        title = f"{title} {title_suffix}"
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+    add_figure_hint(fig, "Lower is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
 
 
 def family_variants_for_dim(df_dim, family_name):
@@ -285,6 +331,15 @@ def pick_tradeoff_grid_size(df_dim, preferred=512):
     return grid_sizes[-1]
 
 
+def compute_mp_per_sec(row):
+    points_per_step = float(row["grid_size"]) ** int(row["dim"])
+    total_points = points_per_step * float(row["timesteps"])
+    elapsed_sec = float(row["elapsed_ms"]) / 1000.0
+    if elapsed_sec <= 0.0:
+        return np.nan
+    return total_points / elapsed_sec / 1.0e6
+
+
 def plot_accuracy_bandwidth_tradeoff(df_dim, outdir, dim_label, filename):
     reaches = sorted(df_dim["reach"].unique())
     grid_size = pick_tradeoff_grid_size(df_dim)
@@ -362,6 +417,88 @@ def plot_accuracy_bandwidth_tradeoff(df_dim, outdir, dim_label, filename):
         y=0.985,
     )
     add_figure_hint(fig, "Lower error is better; higher bandwidth / peak is better")
+    fig.tight_layout(rect=[0, 0, 1, 0.9])
+    fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
+    print(f"  saved {outdir}/{filename}")
+
+
+def plot_accuracy_throughput_tradeoff(df_dim, outdir, dim_label, filename):
+    reaches = sorted(df_dim["reach"].unique())
+    grid_size = pick_tradeoff_grid_size(df_dim)
+    plot_df = df_dim[
+        (df_dim["grid_size"] == grid_size)
+        & (~df_dim["variant"].str.contains("cpu"))
+        & (df_dim["variant"].isin(TRADEOFF_INCLUDED_VARIANTS))
+    ].copy()
+    if plot_df.empty:
+        print(f"  skipped {filename}: no GPU rows found at N={grid_size}")
+        return
+
+    fig, axes = plt.subplots(1, len(reaches), figsize=(4.6 * len(reaches), 4.0), sharey=True)
+    if len(reaches) == 1:
+        axes = [axes]
+
+    for ax, reach in zip(axes, reaches):
+        sub = plot_df[plot_df["reach"] == reach].copy()
+        if sub.empty:
+            ax.set_title(f"{dim_label} reach={reach}", fontsize=11, fontweight="bold")
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.grid(True, alpha=0.25)
+            continue
+
+        sub = sub.sort_values("max_abs_error")
+        texts = []
+        for _, row in sub.iterrows():
+            variant = row["variant"]
+            x = row["max_abs_error"]
+            y = compute_mp_per_sec(row)
+            ax.scatter(
+                x,
+                y,
+                s=70,
+                color=COLORS.get(variant, "gray"),
+                marker=MARKERS.get(variant, "o"),
+                alpha=0.95,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+            )
+            dx, dy = TRADEOFF_LABEL_OFFSETS.get(variant, (6, 4))
+            text = ax.text(
+                x * (1.0 + dx * 0.002),
+                y + dy * 0.002,
+                TRADEOFF_LABELS.get(variant, METHOD_LABELS.get(variant, LABELS.get(variant, variant))),
+                fontsize=8,
+                color=COLORS.get(variant, "gray"),
+            )
+            texts.append(text)
+
+        adjust_text(
+            texts,
+            ax=ax,
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.5, alpha=0.7),
+            expand=(1.2, 1.4),
+            force_text=(0.5, 0.8),
+            force_static=(0.4, 0.7),
+            only_move={"points": "y", "text": "xy"},
+        )
+
+        ax.set_xscale("log")
+        style_ax(
+            ax,
+            "max |error|",
+            "throughput (MP/s)" if reach == reaches[0] else "",
+            f"{dim_label} reach={reach}",
+            show_legend=False,
+        )
+
+    fig.suptitle(
+        f"{dim_label} accuracy-throughput tradeoff at N={grid_size}",
+        fontsize=13,
+        fontweight="bold",
+        y=0.985,
+    )
+    add_figure_hint(fig, "Lower error is better; higher MP/s is better")
     fig.tight_layout(rect=[0, 0, 1, 0.9])
     fig.savefig(f"{outdir}/{filename}", dpi=150, bbox_inches="tight")
     print(f"  saved {outdir}/{filename}")
@@ -547,26 +684,15 @@ def plot_2d(df, outdir):
     reaches = sorted(d2["reach"].unique())
 
     # figure 1: accuracy vs grid size (one subplot per reach)
-    fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
-    if len(reaches) == 1:
-        axes = [axes]
-    for ax, R in zip(axes, reaches):
-        for v in sorted(d2["variant"].unique(), key=variant_sort_key):
-            if v == "cpu_fp64":
-                continue
-            sub = d2[(d2["variant"] == v) & (d2["reach"] == R)]
-            if sub.empty or sub["max_abs_error"].max() == 0:
-                continue
-            sub = sub.sort_values("grid_size")
-            plot_variant(ax, sub["grid_size"], sub["max_abs_error"], v)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"2D reach={R}")
-    fig.suptitle("2D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    add_figure_hint(fig, "Lower is better")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(f"{outdir}/2d_accuracy.png", dpi=150, bbox_inches="tight")
-    print(f"  saved {outdir}/2d_accuracy.png")
+    plot_accuracy_grid(d2, outdir, "2D", "2d_accuracy.png")
+    plot_accuracy_grid(
+        d2,
+        outdir,
+        "2D",
+        "2d_accuracy_filtered.png",
+        variants=ACCURACY_FILTERED_VARIANTS_2D,
+        title_suffix="(selected variants)",
+    )
 
     # figure 2: bandwidth by precision family and reach
     plot_bandwidth_family_grid(d2, outdir, "2D", "2d_bandwidth.png")
@@ -595,6 +721,7 @@ def plot_2d(df, outdir):
 
     # figure 4: accuracy-performance tradeoff at fixed N
     plot_accuracy_bandwidth_tradeoff(d2, outdir, "2D", "2d_accuracy_bandwidth_tradeoff.png")
+    plot_accuracy_throughput_tradeoff(d2, outdir, "2D", "2d_accuracy_throughput_tradeoff.png")
 
     # figure 5: normalized Kahan benefit
     plot_kahan_benefit(
@@ -627,26 +754,7 @@ def plot_3d(df, outdir):
     reaches = sorted(d3["reach"].unique())
 
     # figure 4: 3D accuracy
-    fig, axes = plt.subplots(1, len(reaches), figsize=(5 * len(reaches), 4.5), sharey=True)
-    if len(reaches) == 1:
-        axes = [axes]
-    for ax, R in zip(axes, reaches):
-        for v in sorted(d3["variant"].unique(), key=variant_sort_key):
-            if "cpu" in v:
-                continue
-            sub = d3[(d3["variant"] == v) & (d3["reach"] == R)]
-            if sub.empty or sub["max_abs_error"].max() == 0:
-                continue
-            sub = sub.sort_values("grid_size")
-            plot_variant(ax, sub["grid_size"], sub["max_abs_error"], v)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        style_ax(ax, "N", "max |error|" if R == reaches[0] else "", f"3D reach={R}")
-    fig.suptitle("3D accuracy vs grid size", fontsize=13, fontweight="bold", y=1.02)
-    add_figure_hint(fig, "Lower is better")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(f"{outdir}/3d_accuracy.png", dpi=150, bbox_inches="tight")
-    print(f"  saved {outdir}/3d_accuracy.png")
+    plot_accuracy_grid(d3, outdir, "3D", "3d_accuracy.png")
 
     # figure 5: bandwidth by precision family and reach
     plot_bandwidth_family_grid(d3, outdir, "3D", "3d_bandwidth.png")
@@ -676,6 +784,7 @@ def plot_3d(df, outdir):
 
     # figure 7: accuracy-performance tradeoff at fixed N
     plot_accuracy_bandwidth_tradeoff(d3, outdir, "3D", "3d_accuracy_bandwidth_tradeoff.png")
+    plot_accuracy_throughput_tradeoff(d3, outdir, "3D", "3d_accuracy_throughput_tradeoff.png")
 
     # figure 8: normalized Kahan benefit
     plot_kahan_benefit(
