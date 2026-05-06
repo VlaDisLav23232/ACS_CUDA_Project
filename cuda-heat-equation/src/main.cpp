@@ -181,6 +181,13 @@ int main(int argc, char** argv) {
             print_summary(rk);
             write_csv_row(csv_path, rk);
         }
+        if (variant == "all" || variant == "cfp16_kahan_3d_tiled") {
+            printf("\n--- CUDA custom fp16 (1-4-11) + Kahan (tiled, 3D) ---\n");
+            StencilResult rcfkt3d = run_cuda_cfp16_kahan_3d_tiled(cfg);
+            compute_errors(rcfkt3d, cpu_result.final_grid);
+            print_summary(rcfkt3d);
+            write_csv_row(csv_path, rcfkt3d);
+        }
     }
 
     printf("\nresults written to %s\n", csv_path.c_str());
