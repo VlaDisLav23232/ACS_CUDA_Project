@@ -168,6 +168,7 @@ StencilResult run_cuda_fp16_naive_3d(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)N * N * N * sizeof(__half);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = ((double)N * N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_naive_3d";
@@ -177,6 +178,7 @@ StencilResult run_cuda_fp16_naive_3d(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * half_bytes;
     res.final_grid = result_f;
 
@@ -254,6 +256,7 @@ StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)N * N * N * sizeof(__half) + 2.0 * (double)N * N * N * sizeof(float);
     double total_bw_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bw_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = ((double)N * N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_fp16_kahan_3d";
@@ -263,6 +266,7 @@ StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * half_bytes + float_bytes;  // single compensation buffer
     res.final_grid = result_f;
 

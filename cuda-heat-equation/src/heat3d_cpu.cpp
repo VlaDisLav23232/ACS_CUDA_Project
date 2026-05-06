@@ -82,6 +82,7 @@ StencilResult run_cpu_fp64_3d(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = ms;
     res.effective_bw_gbs = 0.0;
+    res.megapoints_per_sec = ((double)N * N * N * cfg.timesteps) / (ms / 1000.0) / 1e6;
     res.memory_bytes = 2 * total * sizeof(double);
     res.final_grid.resize(total);
     for (size_t i = 0; i < total; i++)

@@ -127,6 +127,7 @@ StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)N * N * N * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = ((double)N * N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_fp32_3d";
@@ -136,6 +137,7 @@ StencilResult run_cuda_fp32_3d(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * grid_bytes;
     res.final_grid = h_u;
 

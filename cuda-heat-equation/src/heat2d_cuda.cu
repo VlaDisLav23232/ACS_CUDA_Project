@@ -98,6 +98,9 @@ StencilResult run_cuda_fp32(const StencilConfig& cfg) {
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
 
+    // megapoints/sec: how many grid point updates per second
+    double mpts = ((double)N * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
+
     StencilResult res;
     res.variant_name = "cuda_fp32";
     res.grid_size = N;
@@ -106,6 +109,7 @@ StencilResult run_cuda_fp32(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * grid_bytes;
     res.final_grid = h_u;
 

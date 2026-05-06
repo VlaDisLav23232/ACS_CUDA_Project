@@ -41,7 +41,7 @@ void ensure_csv_header(const std::string& filepath) {
     struct stat st;
     if (stat(filepath.c_str(), &st) != 0) {
         std::ofstream f(filepath);
-        f << "timestamp,variant,dim,reach,grid_size,timesteps,elapsed_ms,max_abs_error,l2_error,bandwidth_gbs,memory_bytes\n";
+        f << "timestamp,variant,dim,reach,grid_size,timesteps,elapsed_ms,max_abs_error,l2_error,bandwidth_gbs,megapoints_per_sec,memory_bytes\n";
         f.close();
     }
 }
@@ -62,6 +62,7 @@ void write_csv_row(const std::string& filepath, const StencilResult& result) {
       << result.max_abs_error << ","
       << result.l2_error << ","
       << result.effective_bw_gbs << ","
+      << result.megapoints_per_sec << ","
       << result.memory_bytes << "\n";
     f.close();
 }
@@ -77,6 +78,8 @@ void print_summary(const StencilResult& result) {
     printf("  time:       %.2f ms\n", result.elapsed_ms);
     printf("  max error:  %.6e\n", result.max_abs_error);
     printf("  L2 error:   %.6e\n", result.l2_error);
+    if (result.megapoints_per_sec > 0)
+        printf("  throughput: %.1f Mpoints/s\n", result.megapoints_per_sec);
     if (result.effective_bw_gbs > 0)
         printf("  bandwidth:  %.1f GB/s\n", result.effective_bw_gbs);
     printf("  memory:     %.2f MB\n", result.memory_bytes / (1024.0 * 1024.0));
