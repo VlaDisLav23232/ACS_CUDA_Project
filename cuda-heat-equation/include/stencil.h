@@ -41,11 +41,17 @@ StencilResult run_cpu_fp64(const StencilConfig& cfg);
 StencilResult run_cuda_fp32(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_naive(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_kahan(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_kahan_reg(const StencilConfig& cfg);
+StencilResult run_cuda_cfp16_naive(const StencilConfig& cfg);
+StencilResult run_cuda_cfp16_kahan(const StencilConfig& cfg);
+StencilResult run_cuda_cfp16_kahan_tiled(const StencilConfig& cfg);
+StencilResult run_cuda_fp16_tensor_core(const StencilConfig& cfg);
 
 StencilResult run_cpu_fp64_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp32_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_naive_3d(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg);
+StencilResult run_cuda_cfp16_kahan_3d_tiled(const StencilConfig& cfg);
 
 // 2.5D blocking: shared memory tiling for XY, Z from cache
 StencilResult run_cuda_fp32_3d_25d(const StencilConfig& cfg);

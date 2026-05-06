@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 
-# Must set CUDA architectures BEFORE project() in CMake 3.18+
-# RTX 2050 Laptop GPU = compute capability 8.6 (Ampere)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+# Must set CUDA architectures BEFORE project() in CMake 3.18+.
+# Default stays at sm_75 for the original development machine, but callers
+# such as Colab can override it with -DCMAKE_CUDA_ARCHITECTURES=<cc>.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 75)
+endif()
 
 project(heat_stencil LANGUAGES CXX CUDA)
 
@@ -28,11 +31,14 @@ add_executable(heat_stencil
     src/heat2d_cpu.cpp
     src/heat2d_cuda.cu
     src/heat2d_cuda_fp16.cu
+    src/heat2d_cuda_cfp16.cu
     src/heat3d_cpu.cpp
     src/heat3d_cuda.cu
     src/heat3d_cuda_fp16.cu
+    src/heat3d_cuda_cfp16.cu
     src/heat3d_cuda_25d.cu
     src/heat3d_cuda_async_pipeline.cu
+    src/tensor_core_stencil.cu
     src/metrics.cpp
 )
 
