@@ -24,9 +24,12 @@ add_executable(wave_stencil
 	src/wave2d_cpu.cpp
 	src/wave2d_cuda.cu
 	src/wave2d_cuda_fp16.cu
+	src/wave2d_tensor_core.cu
 	src/wave3d_cpu.cpp
 	src/wave3d_cuda.cu
 	src/wave3d_cuda_fp16.cu
+	src/wave3d_cuda_25d.cu
+	src/wave3d_cuda_async_pipeline.cu
 	src/metrics.cpp
 )
 

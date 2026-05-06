@@ -31,7 +31,7 @@ static void print_usage() {
     std::printf("  -t <steps>      timesteps (default 3000)\n");
     std::printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     std::printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    std::printf("  -v <variant>    cpu|fp32|fp16|kahan|all (default all)\n");
+    std::printf("  -v <variant>    cpu|fp32|fp16|kahan|tensor|fp32_25d|kahan_25d|kahan_25d_async|all (default all)\n");
     std::printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     std::printf("  -h              show this help\n");
 }
@@ -118,6 +118,17 @@ int main(int argc, char** argv) {
             print_summary(rk);
             write_csv_row(csv_path, rk);
         }
+        if (variant == "all" || variant == "tensor") {
+            if (cfg.nx % 16 != 0) {
+                std::fprintf(stderr, "warning: tensor core variant requires N%%16==0, skipping (N=%d)\n", cfg.nx);
+            } else {
+                std::printf("\n--- CUDA fp16 Tensor Core (WMMA) ---\n");
+                StencilResult rtc = run_cuda_fp16_tensor_core(cfg);
+                compute_errors(rtc, cpu_result.final_grid);
+                print_summary(rtc);
+                write_csv_row(csv_path, rtc);
+            }
+        }
     } else {
         std::printf("\n--- CPU fp64 reference (3D) ---\n");
         StencilResult cpu_result = run_cpu_fp64_3d(cfg);
@@ -146,6 +157,27 @@ int main(int argc, char** argv) {
             compute_errors(rk, cpu_result.final_grid);
             print_summary(rk);
             write_csv_row(csv_path, rk);
+        }
+        if (variant == "all" || variant == "fp32_25d") {
+            std::printf("\n--- CUDA fp32 2.5D blocking (3D) ---\n");
+            StencilResult r25 = run_cuda_fp32_3d_25d(cfg);
+            compute_errors(r25, cpu_result.final_grid);
+            print_summary(r25);
+            write_csv_row(csv_path, r25);
+        }
+        if (variant == "all" || variant == "kahan_25d") {
+            std::printf("\n--- CUDA fp16 + Kahan 2.5D blocking (3D) ---\n");
+            StencilResult rk25 = run_cuda_fp16_kahan_3d_25d(cfg);
+            compute_errors(rk25, cpu_result.final_grid);
+            print_summary(rk25);
+            write_csv_row(csv_path, rk25);
+        }
+        if (variant == "all" || variant == "kahan_25d_async") {
+            std::printf("\n--- CUDA fp16 + Kahan async memory pipeline (3D, 2.5D tiling) ---\n");
+            StencilResult rk25a = run_cuda_fp16_kahan_3d_25d_async(cfg);
+            compute_errors(rk25a, cpu_result.final_grid);
+            print_summary(rk25a);
+            write_csv_row(csv_path, rk25a);
         }
     }
 
