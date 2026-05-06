@@ -50,3 +50,6 @@ StencilResult run_cuda_fp16_kahan_3d(const StencilConfig& cfg);
 // 2.5D blocking: shared memory tiling for XY, Z from cache
 StencilResult run_cuda_fp32_3d_25d(const StencilConfig& cfg);
 StencilResult run_cuda_fp16_kahan_3d_25d(const StencilConfig& cfg);
+
+// async pipeline: 2-stage block-scope z-streaming with cuda::memcpy_async
+StencilResult run_cuda_fp16_kahan_3d_25d_async(const StencilConfig& cfg);

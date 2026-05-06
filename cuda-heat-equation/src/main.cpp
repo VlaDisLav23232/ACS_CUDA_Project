@@ -28,7 +28,7 @@ void print_usage() {
     printf("  -t <steps>      timesteps (default 5000)\n");
     printf("  -d <dim>        dimensionality: 2 or 3 (default 2)\n");
     printf("  -r <reach>      stencil reach per axis: 1,4,8 (default 1)\n");
-    printf("  -v <variant>    cpu|fp32|fp16|kahan|fp32_25d|kahan_25d|kahan_async|kahan_25d_async|all (default all)\n");
+    printf("  -v <variant>    cpu|fp32|fp16|kahan|fp32_25d|kahan_25d|kahan_25d_async|all (default all)\n");
     printf("  -o <path>       CSV output path (default results/benchmarks.csv)\n");
     printf("  -h              show this help\n");
 }
@@ -159,13 +159,6 @@ int main(int argc, char** argv) {
             compute_errors(rk25, cpu_result.final_grid);
             print_summary(rk25);
             write_csv_row(csv_path, rk25);
-        }
-        if (variant == "all" || variant == "kahan_async") {
-            printf("\n--- CUDA fp16 + Kahan async memory pipeline (3D, non-2.5D) ---\n");
-            StencilResult rk_async = run_cuda_fp16_kahan_3d_async(cfg);
-            compute_errors(rk_async, cpu_result.final_grid);
-            print_summary(rk_async);
-            write_csv_row(csv_path, rk_async);
         }
         if (variant == "all" || variant == "kahan_25d_async") {
             printf("\n--- CUDA fp16 + Kahan async memory pipeline (3D, 2.5D tiling) ---\n");
