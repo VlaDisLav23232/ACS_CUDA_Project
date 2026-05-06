@@ -37,6 +37,7 @@ add_executable(heat_stencil
     src/heat3d_cuda_fp16.cu
     src/heat3d_cuda_cfp16.cu
     src/heat3d_cuda_25d.cu
+    src/heat3d_cuda_async_pipeline.cu
     src/tensor_core_stencil.cu
     src/metrics.cpp
 )
