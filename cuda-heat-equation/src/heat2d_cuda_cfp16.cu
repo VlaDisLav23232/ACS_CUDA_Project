@@ -274,6 +274,7 @@ StencilResult run_cuda_cfp16_naive(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * static_cast<double>(N) * N * sizeof(cfp16_t);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = (static_cast<double>(N) * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_cfp16_naive";
@@ -283,6 +284,7 @@ StencilResult run_cuda_cfp16_naive(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * cfp16_bytes;
     res.final_grid = result_f;
 
@@ -354,6 +356,7 @@ StencilResult run_cuda_cfp16_kahan(const StencilConfig& cfg) {
                           + 2.0 * static_cast<double>(N) * N * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = (static_cast<double>(N) * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_cfp16_kahan";
@@ -363,6 +366,7 @@ StencilResult run_cuda_cfp16_kahan(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * cfp16_bytes + float_bytes;
     res.final_grid = result_f;
 
@@ -436,6 +440,7 @@ StencilResult run_cuda_cfp16_kahan_tiled(const StencilConfig& cfg) {
                           + 2.0 * static_cast<double>(N) * N * sizeof(float);
     double total_bytes = bytes_per_step * cfg.timesteps;
     double bw = total_bytes / (elapsed_ms / 1000.0) / 1e9;
+    double mpts = (static_cast<double>(N) * N * cfg.timesteps) / (elapsed_ms / 1000.0) / 1e6;
 
     StencilResult res;
     res.variant_name = "cuda_cfp16_kahan_tiled";
@@ -445,6 +450,7 @@ StencilResult run_cuda_cfp16_kahan_tiled(const StencilConfig& cfg) {
     res.timesteps = cfg.timesteps;
     res.elapsed_ms = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes = 2 * cfp16_bytes + float_bytes;
     res.final_grid = result_f;
 

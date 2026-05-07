@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cuda_runtime.h>
 
 using cfp16_t = uint16_t;

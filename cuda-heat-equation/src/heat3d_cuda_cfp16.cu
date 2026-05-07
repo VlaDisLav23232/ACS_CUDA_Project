@@ -231,7 +231,7 @@ __global__ void apply_neumann_bc_3d_cfp16(cfp16_t* u, int N, int R) {
     }
 }
 
-__global__ void apply_neumann_bc_3d_comp(float* c, int N, int R) {
+__global__ void apply_neumann_bc_3d_comp_cfp16(float* c, int N, int R) {
     int a     = blockIdx.x * blockDim.x + threadIdx.x;
     int b_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (a >= N || b_idx >= N) return;
@@ -298,6 +298,7 @@ StencilResult run_cuda_cfp16_naive_3d(const StencilConfig& cfg) {
     // Minimum DRAM bandwidth: read u + write u_next each step
     double bytes_per_step = 2.0 * (double)total * sizeof(cfp16_t);
     double bw = (bytes_per_step * cfg.timesteps) / (elapsed_ms * 1e-3) / 1e9;
+    double mpts = ((double)total * cfg.timesteps) / (elapsed_ms * 1e-3) / 1e6;
 
     StencilResult res;
     res.variant_name     = "cuda_cfp16_naive_3d";
@@ -307,6 +308,7 @@ StencilResult run_cuda_cfp16_naive_3d(const StencilConfig& cfg) {
     res.timesteps        = cfg.timesteps;
     res.elapsed_ms       = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes     = 2 * cfp16_bytes;
     res.final_grid       = std::move(result_f);
 
@@ -317,7 +319,7 @@ StencilResult run_cuda_cfp16_naive_3d(const StencilConfig& cfg) {
     return res;
 }
 
-StencilResult run_cuda_cfp16_kahan_3d(const StencilConfig& cfg) {
+StencilResult run_cuda_cfp16_kahan_3d_tiled(const StencilConfig& cfg) {
     int    N           = cfg.nx;
     int    R           = cfg.stencil_reach;
     float  r           = cfg.k * cfg.dt / (cfg.dx * cfg.dx);
@@ -371,7 +373,7 @@ StencilResult run_cuda_cfp16_kahan_3d(const StencilConfig& cfg) {
         heat3d_cfp16_kahan_tiled_kernel<<<grid3, block, smem_bytes>>>(
             d_u, d_u_next, d_c, d_c_next, N, r);
         apply_neumann_bc_3d_cfp16<<<bc_grid, bc_block>>>(d_u_next, N, R);
-        apply_neumann_bc_3d_comp <<<bc_grid, bc_block>>>(d_c_next, N, R);
+        apply_neumann_bc_3d_comp_cfp16<<<bc_grid, bc_block>>>(d_c_next, N, R);
         cfp16_t* tmp_h = d_u; d_u = d_u_next; d_u_next = tmp_h;
         float*   tmp_c = d_c; d_c = d_c_next; d_c_next = tmp_c;
     }
@@ -393,6 +395,7 @@ StencilResult run_cuda_cfp16_kahan_3d(const StencilConfig& cfg) {
     double bytes_per_step = 2.0 * (double)total * sizeof(cfp16_t)
                           + 2.0 * (double)total * sizeof(float);
     double bw = (bytes_per_step * cfg.timesteps) / (elapsed_ms * 1e-3) / 1e9;
+    double mpts = ((double)total * cfg.timesteps) / (elapsed_ms * 1e-3) / 1e6;
 
     StencilResult res;
     res.variant_name     = "cuda_cfp16_kahan_3d";
@@ -402,6 +405,7 @@ StencilResult run_cuda_cfp16_kahan_3d(const StencilConfig& cfg) {
     res.timesteps        = cfg.timesteps;
     res.elapsed_ms       = elapsed_ms;
     res.effective_bw_gbs = bw;
+    res.megapoints_per_sec = mpts;
     res.memory_bytes     = 2 * cfp16_bytes + 2 * float_bytes;
     res.final_grid       = std::move(result_f);
 
